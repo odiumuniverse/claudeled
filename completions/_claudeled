@@ -1,0 +1,43 @@
+#compdef claudeled
+# zsh completion for claudeled.
+# Keyboard names come from the running binary, so a newly plugged keyboard is
+# completable immediately -- nothing is baked in at install time.
+
+_claudeled_keyboards() {
+  local -a names
+  # One name per line. Names contain spaces, so split on newlines only.
+  names=(${(f)"$(claudeled devices --names 2>/dev/null)"})
+  _describe -t keyboards 'keyboard' names
+}
+
+_claudeled() {
+  local -a commands
+  commands=(
+    'devices:list keyboards and which are selected'
+    'test:light a keyboard for 3s'
+    'status:show tracked sessions and the current mode'
+    'hooks:print the Claude Code hook config to install'
+  )
+
+  _arguments -C \
+    '1: :->command' \
+    '*:: :->argument'
+
+  case $state in
+    command)
+      _describe -t commands 'claudeled command' commands
+      ;;
+    argument)
+      case $words[1] in
+        test)
+          _claudeled_keyboards
+          ;;
+        devices)
+          _arguments '--names[print names only, for scripts]'
+          ;;
+      esac
+      ;;
+  esac
+}
+
+_claudeled "$@"
