@@ -11,20 +11,52 @@ LEDs were lit: neither was ever asserted.
 
 ## Install
 
+### From source (recommended)
+
 ```sh
-brew tap odiumuniverse/claudeled https://github.com/odiumuniverse/claudeled
-brew install --cask claudeled
+git clone https://github.com/odiumuniverse/claudeled
+cd claudeled
+./build.sh install
 ```
 
-Then launch it once. It installs its Claude Code hooks on first launch and lives in
-the menu bar — no Dock icon, no app switcher entry.
+That builds the app, puts it in `/Applications`, symlinks the CLI onto your `PATH`,
+installs the zsh completion, and launches it. Needs `swiftc` from the Xcode Command
+Line Tools — `xcode-select --install` if you do not have them.
 
-### From source
+Building locally also sidesteps Gatekeeper entirely, because nothing was downloaded.
+
+### From a release
+
+Download the zip from
+[Releases](https://github.com/odiumuniverse/claudeled/releases), unzip, and move
+`claudeled.app` to `/Applications`.
+
+macOS will refuse to open it: the app is ad-hoc signed, not notarised, and anything
+that arrives through a browser carries a quarantine flag. Either strip the flag:
 
 ```sh
-./build.sh            # -> build/claudeled.app
+xattr -dr com.apple.quarantine /Applications/claudeled.app
+```
+
+or open it once, let it be blocked, then allow it in
+*System Settings → Privacy & Security → Open Anyway*.
+
+Notarising would remove this step, and requires a paid Apple Developer account.
+
+Launch it once either way. It installs its Claude Code hooks on first launch and
+lives in the menu bar — no Dock icon, no app switcher entry.
+
+### Rebuilding
+
+An ad-hoc signature is derived from the binary, so every rebuild looks like a
+different app to macOS and the Input Monitoring grant stops applying.
+`./build.sh install` clears the stale grant so the prompt appears again; grant it and
+the app restarts itself.
+
+```sh
+./build.sh            # build only, into build/
 ./build.sh test       # run the checks
-open build/claudeled.app
+./build.sh install    # build, install, relaunch
 ```
 
 ## Tests
@@ -126,11 +158,14 @@ element it can be driven, and `claudeled test <name>` tells you in three seconds
 
 ## Uninstall
 
-Untick "Claude Code hooks installed" in the menu first, then:
+Untick "Claude Code hooks installed" in the menu first — that takes claudeled out of
+`~/.claude/settings.json` and leaves your other hooks alone. Then:
 
 ```sh
-brew uninstall --cask claudeled
-brew uninstall --zap --cask claudeled   # also removes ~/.config/claudeled
+rm -rf /Applications/claudeled.app
+rm -f  "$(brew --prefix 2>/dev/null || echo /usr/local)/bin/claudeled"
+rm -f  "$(brew --prefix 2>/dev/null || echo /usr/local)/share/zsh/site-functions/_claudeled"
+rm -rf ~/.config/claudeled
 ```
 
 ## License
