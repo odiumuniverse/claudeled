@@ -16,7 +16,7 @@ LEDs were lit: neither was ever asserted.
 ```sh
 git clone https://github.com/odiumuniverse/claudeled
 cd claudeled
-./build.sh install
+make install
 ```
 
 That builds the app, puts it in `/Applications`, symlinks the CLI onto your `PATH`,
@@ -49,22 +49,25 @@ lives in the menu bar — no Dock icon, no app switcher entry.
 ### Rebuilding
 
 An ad-hoc signature is derived from the binary, so every rebuild looks like a
-different app to macOS and the Input Monitoring grant stops applying.
-`./build.sh install` clears the stale grant so the prompt appears again; grant it and
-the app restarts itself.
+different app to macOS and the Input Monitoring grant stops applying. `make install`
+clears the stale grant so the prompt appears again; grant it and the app restarts
+itself.
 
 ```sh
-./build.sh            # build only, into build/
-./build.sh test       # run the checks
-./build.sh install    # build, install, relaunch
+make            # build into build/
+make test       # run the checks
+make install    # build, install, relaunch
+make uninstall  # remove the app, the CLI and the completion
+make release    # zip the bundle for a GitHub release
+make help       # list the targets
 ```
 
 ## Tests
 
 `Core.swift` holds everything that can be decided without a keyboard or a screen —
 selection, staleness, the blink decision, the `settings.json` merge — so it can be
-tested directly. `./build.sh test` runs assert-based checks over it: no framework,
-no fixtures, one binary that exits non-zero when something breaks.
+tested directly. `make test` runs assert-based checks over it: no framework, no
+fixtures, one binary that exits non-zero when something breaks.
 
 ## Menu
 
@@ -162,11 +165,12 @@ Untick "Claude Code hooks installed" in the menu first — that takes claudeled 
 `~/.claude/settings.json` and leaves your other hooks alone. Then:
 
 ```sh
-rm -rf /Applications/claudeled.app
-rm -f  "$(brew --prefix 2>/dev/null || echo /usr/local)/bin/claudeled"
-rm -f  "$(brew --prefix 2>/dev/null || echo /usr/local)/share/zsh/site-functions/_claudeled"
-rm -rf ~/.config/claudeled
+make uninstall          # app, CLI symlink, completion
+rm -rf ~/.config/claudeled   # config and session state, if you mean it
 ```
+
+`make uninstall` deliberately leaves the config alone, so reinstalling does not lose
+your keyboard selection.
 
 ## License
 
