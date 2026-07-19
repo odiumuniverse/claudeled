@@ -19,6 +19,7 @@ import IOKit.hid
 import ServiceManagement
 
 let githubURL = "https://github.com/odiumuniverse/claudeled"
+let showNotification = "com.odiumuniverse.claudeled.show"
 
 // MARK: - finding the session that owns a hook
 
@@ -66,6 +67,34 @@ func claudeAncestor() -> pid_t {
         pid = parent
     }
     return firstNonShell
+}
+
+// MARK: - Input Monitoring
+//
+// macOS gates IOHIDDeviceOpen and element enumeration on keyboards behind Input
+// Monitoring, whether you intend to read keystrokes or only write to an LED. Without
+// it the caps LED element is invisible, which looks exactly like a keyboard that has
+// no LED at all -- so check explicitly and say so, rather than lying in the menu.
+//
+// The CLI usually works without it because it inherits the terminal's grant. The app
+// is its own subject and needs its own.
+
+enum InputMonitoring {
+    static var granted: Bool {
+        IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+    }
+
+    /// Shows the system prompt, once per app identity.
+    static func request() {
+        _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
+    }
+
+    static func openSettings() {
+        guard let url = URL(string:
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
+        else { return }
+        NSWorkspace.shared.open(url)
+    }
 }
 
 // MARK: - settings.json
@@ -288,6 +317,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private let registry = KeyboardRegistry()
     private var blinker: Blinker!
+    private var accessAtLaunch = InputMonitoring.granted
+    private var relaunching = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         ensureDirs()
@@ -297,6 +328,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem.menu = menu
+
+        // Ask on launch: without this the keyboards silently look LED-less.
+        if !InputMonitoring.granted { InputMonitoring.request() }
+
+        // `claudeled show` brings a hidden icon back from the command line.
+        DistributedNotificationCenter.default().addObserver(
+            self, selector: #selector(showIcon),
+            name: Notification.Name(showNotification), object: nil)
 
         // The app does nothing without hooks, so install them on launch. Idempotent, and
         // it re-points them if the bundle has moved since last run.
@@ -308,6 +347,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         registry.start()
         blinker = Blinker(registry: registry)
         blinker.start()
+
+        // An Input Monitoring change only reaches a fresh process. Granting it while we
+        // run would otherwise leave the app permanently broken-looking, so restart.
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            guard let self, !self.relaunching,
+                  InputMonitoring.granted != self.accessAtLaunch else { return }
+            self.relaunching = true
+            self.relaunch()
+        }
+    }
+
+    private func relaunch() {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/sh")
+        // Wait for this process to be gone before reopening, or macOS reactivates it
+        // instead of starting the replacement.
+        task.arguments = ["-c", "sleep 1; open \"\(Bundle.main.bundlePath)\""]
+        try? task.run()
+        blinker?.stop()
+        NSApp.terminate(nil)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -318,6 +377,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let config = Config.load()
+
+        // Without Input Monitoring the keyboards look like they have no LED, so lead
+        // with the real reason instead of letting the list mislead.
+        guard InputMonitoring.granted else {
+            let problem = NSMenuItem(title: "Input Monitoring is off", action: nil,
+                                     keyEquivalent: "")
+            problem.isEnabled = false
+            menu.addItem(problem)
+
+            let explain = NSMenuItem(title: "claudeled cannot reach the LEDs without it",
+                                     action: nil, keyEquivalent: "")
+            explain.isEnabled = false
+            menu.addItem(explain)
+            menu.addItem(.separator())
+
+            let fix = NSMenuItem(title: "Open Privacy settings…",
+                                 action: #selector(openInputMonitoring), keyEquivalent: "")
+            fix.target = self
+            menu.addItem(fix)
+            menu.addItem(.separator())
+
+            let quit = NSMenuItem(title: "Quit claudeled", action: #selector(quit),
+                                  keyEquivalent: "q")
+            quit.target = self
+            menu.addItem(quit)
+            return
+        }
 
         let waiting = readSessions().filter { blinkingEvents.contains($0.event) }.count
         let header = NSMenuItem(
@@ -369,6 +455,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(login)
 
         menu.addItem(.separator())
+
+        let hide = NSMenuItem(title: "Hide icon", action: #selector(hideIcon),
+                              keyEquivalent: "h")
+        hide.target = self
+        hide.toolTip = "Keeps blinking. Launch claudeled again, or run `claudeled show`, "
+            + "to bring the icon back."
+        menu.addItem(hide)
 
         let github = NSMenuItem(title: "Visit GitHub", action: #selector(openGitHub),
                                 keyEquivalent: "")
@@ -422,6 +515,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSLog("claudeled: login item toggle failed: \(error)")
         }
         reopenMenu()
+    }
+
+    @objc private func openInputMonitoring() {
+        InputMonitoring.request()      // no-op once the user has answered once
+        InputMonitoring.openSettings()
+    }
+
+    /// Hiding only takes the icon out of the menu bar. The blinking is the point of the
+    /// app, so it keeps running.
+    @objc private func hideIcon() {
+        statusItem.isVisible = false
+    }
+
+    @objc private func showIcon() {
+        statusItem.isVisible = true
+    }
+
+    /// Launching an already-running app does not start a second copy, it reopens this
+    /// one -- which is how a hidden icon comes back.
+    func applicationShouldHandleReopen(_ sender: NSApplication,
+                                       hasVisibleWindows: Bool) -> Bool {
+        showIcon()
+        return true
     }
 
     @objc private func openGitHub() {
@@ -525,6 +641,7 @@ claudeled -- Caps Lock LED indicator for Claude Code
   claudeled devices --names    names only, for shell completion
   claudeled test <keyboard>    light a keyboard for 3s
   claudeled status             show tracked sessions
+  claudeled show               bring the menu bar icon back after hiding it
   claudeled hooks              print the hook config, to install it by hand
   claudeled hook <event>       internal: called by the hooks themselves
 
@@ -558,6 +675,10 @@ case nil:
     app.delegate = delegate
     app.setActivationPolicy(.accessory)  // menu bar only, no Dock icon
     app.run()
+case "show":
+    DistributedNotificationCenter.default()
+        .postNotificationName(Notification.Name(showNotification), object: nil,
+                              userInfo: nil, deliverImmediately: true)
 case "devices": cliDevices(namesOnly: arguments.contains("--names"))
 case "test":    cliTest(arguments.count > 1 ? arguments[1] : "")
 case "status":  cliStatus()

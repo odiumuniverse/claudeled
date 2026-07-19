@@ -42,6 +42,10 @@ no fixtures, one binary that exits non-zero when something breaks.
 | Keyboard list | tick any combination; keyboards without a caps LED are listed but not selectable |
 | Claude Code hooks installed | tick to install, untick to remove |
 | Start at login | registers a login item via `SMAppService` |
+| Hide icon | takes the icon out of the menu bar, keeps blinking |
+
+Hiding is not quitting. To bring the icon back, launch claudeled again — a second
+launch reopens the running copy rather than starting another — or run `claudeled show`.
 
 The lamp has exactly one meaning: Claude is waiting for you. It stays dark while
 Claude works, which is most of the time.
@@ -59,6 +63,7 @@ claudeled devices            list keyboards and which ones blink
 claudeled devices --names    names only, for scripts
 claudeled test <keyboard>    light a keyboard for 3s
 claudeled status             show tracked sessions
+claudeled show               bring the icon back after hiding it
 claudeled hooks              print the hook config, if you prefer to install it yourself
 ```
 
@@ -88,13 +93,23 @@ where the process could not be identified.
 
 ## Permissions
 
-macOS may ask for **Input Monitoring** the first time, because opening a keyboard HID
-device is gated behind it regardless of intent. You can decline: driving the LED works
-without it, tested with the permission revoked.
+claudeled **requires Input Monitoring**, in
+*System Settings → Privacy & Security → Input Monitoring*. It asks on first launch.
 
-claudeled contains no input-reading code — no `IOHIDDeviceRegisterInputValueCallback`,
-no `IOHIDDeviceRegisterInputReportCallback`, no event tap, no global monitor. It only
-registers device arrival and removal callbacks, and writes LED values.
+macOS gates opening a keyboard HID device behind that permission whether you mean to
+read keystrokes or only write to an LED. Without it the caps LED element is not merely
+unwritable, it is invisible — the keyboard looks like it has no LED at all. The menu
+says so explicitly and offers to open the settings pane, rather than showing you a
+list of keyboards that mysteriously cannot be selected.
+
+The command line tool often works without the grant because it inherits the one held
+by your terminal. The app is its own subject in the privacy database and needs its own.
+
+What that permission allows and what claudeled does with it are different things.
+There is no input-reading code in this repository: no
+`IOHIDDeviceRegisterInputValueCallback`, no `IOHIDDeviceRegisterInputReportCallback`,
+no event tap, no global monitor. It registers device arrival and removal callbacks,
+and writes LED values. Grep for it before you trust it.
 
 ## Tested on
 
