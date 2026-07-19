@@ -7,7 +7,7 @@
 #   make release    zip the bundle for a GitHub release
 #   make clean      throw away build output
 
-VERSION ?= 0.1.0
+VERSION ?= 0.9.0-beta
 APP      = build/claudeled.app
 BUNDLE   = com.odiumuniverse.claudeled
 SOURCES  = Core.swift main.swift
