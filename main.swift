@@ -89,6 +89,14 @@ enum InputMonitoring {
         _ = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
     }
 
+    static var description: String {
+        switch IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) {
+        case kIOHIDAccessTypeGranted: return "granted"
+        case kIOHIDAccessTypeDenied: return "denied"
+        default: return "unknown (never asked)"
+        }
+    }
+
     static func openSettings() {
         guard let url = URL(string:
             "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
@@ -331,6 +339,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         // Ask on launch: without this the keyboards silently look LED-less.
         if !InputMonitoring.granted { InputMonitoring.request() }
+
+        // The privacy database keys on the code signature, and an ad-hoc signature
+        // changes with every build -- so a grant given to yesterday's build does not
+        // apply today. Record what we actually see, so diagnosing does not rely on
+        // guessing from the outside.
+        diagnose("launched from \(Bundle.main.bundlePath)")
+        diagnose("input monitoring: \(InputMonitoring.description)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            let inventory = self?.registry.inventory() ?? []
+            diagnose("keyboards seen: \(inventory.count), " +
+                     "drivable: \(inventory.filter(\.drivable).count)")
+            for keyboard in inventory {
+                diagnose("  \(keyboard.name): capsLED=\(keyboard.drivable)")
+            }
+        }
 
         // `claudeled show` brings a hidden icon back from the command line.
         DistributedNotificationCenter.default().addObserver(
