@@ -7,10 +7,17 @@ cd "$(dirname "$0")"
 APP="build/claudeled.app"
 VERSION="${VERSION:-0.1.0}"
 
+# `./build.sh test` runs the checks over Core.swift and stops there.
+if [ "$1" = "test" ]; then
+    mkdir -p build
+    swiftc -O Core.swift tests/main.swift -o build/tests
+    exec ./build/tests
+fi
+
 rm -rf build
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
-swiftc -O claudeled.swift -o "$APP/Contents/MacOS/claudeled"
+swiftc -O Core.swift main.swift -o "$APP/Contents/MacOS/claudeled"
 
 # Regenerate the icon if it is missing, so a fresh clone builds a complete bundle.
 if [ ! -f Resources/claudeled.icns ]; then

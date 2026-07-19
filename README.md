@@ -23,31 +23,42 @@ the menu bar — no Dock icon, no app switcher entry.
 
 ```sh
 ./build.sh            # -> build/claudeled.app
+./build.sh test       # run the checks
 open build/claudeled.app
 ```
+
+## Tests
+
+`Core.swift` holds everything that can be decided without a keyboard or a screen —
+selection, staleness, the blink decision, the `settings.json` merge — so it can be
+tested directly. `./build.sh test` runs assert-based checks over it: no framework,
+no fixtures, one binary that exits non-zero when something breaks.
 
 ## Menu
 
 | Item | What it does |
 |---|---|
-| *N sessions waiting* | how many sessions currently match the mode |
-| **Blink while Claude waits for me** | double pulse when Claude hands the turn back to you |
-| **Blink while Claude is working** | single discreet pulse while Claude is busy |
-| Keyboard list | tick any combination; keyboards without a caps LED are shown but disabled |
+| *N sessions waiting* | how many sessions are waiting on you right now |
+| Keyboard list | tick any combination; keyboards without a caps LED are listed but not selectable |
 | Claude Code hooks installed | tick to install, untick to remove |
 | Start at login | registers a login item via `SMAppService` |
 
-The two modes are mutually exclusive: one lamp, one meaning.
+The lamp has exactly one meaning: Claude is waiting for you. It stays dark while
+Claude works, which is most of the time.
+
+Unticking the last selected keyboard is refused. "Nothing selected" and "everything
+selected" are the same stored value, so allowing it would leave you looking at a menu
+full of ticks and a lamp that never lights.
 
 ## CLI
 
 The app bundle is also the CLI, and the cask puts it on your `PATH`.
 
 ```
-claudeled devices            list keyboards and which are selected
+claudeled devices            list keyboards and which ones blink
 claudeled devices --names    names only, for scripts
 claudeled test <keyboard>    light a keyboard for 3s
-claudeled status             show tracked sessions and the current mode
+claudeled status             show tracked sessions
 claudeled hooks              print the hook config, if you prefer to install it yourself
 ```
 
@@ -58,8 +69,14 @@ running binary, so a keyboard you just plugged in is completable straight away.
 
 Claude Code hooks report *events* — `prompt`, `stop`, `notify`, `end` — into
 `~/.config/claudeled/sessions/`, one file per session. The app decides what those
-events mean according to the current mode, which is why switching modes in the menu
-does not require rewriting `settings.json`.
+events mean, so the hooks stay dumb and `settings.json` never has to change again.
+
+`stop` and `notify` mean Claude needs you, and light the lamp. `prompt` means work is
+in flight. `PostToolUse` also reports `prompt`, which is what stops the lamp blinking
+after you approve a permission prompt: a tool running is the evidence that the block
+is gone.
+
+Several windows aggregate with OR — any one session waiting is enough to blink.
 
 `SubagentStop` is deliberately not hooked. That is what keeps subagents from blinking
 the light on behalf of the main agent.

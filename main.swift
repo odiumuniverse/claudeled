@@ -1,18 +1,18 @@
 // claudeled -- Caps Lock LED indicator for Claude Code.
 //
-// Blinks the Caps Lock LED while a Claude Code session needs you. Drives the HID
-// caps LED element directly (IOHIDDeviceSetValue), so the Caps Lock *modifier* is
-// never asserted and typing case is unaffected. Verified on Apple Internal Keyboard
-// (SPI) and Magic Keyboard (Bluetooth), with and without a Caps->Ctrl remap.
+// Blinks the Caps Lock LED while a Claude Code session needs you. Drives the HID caps
+// LED element directly (IOHIDDeviceSetValue), so the Caps Lock *modifier* is never
+// asserted and typing case is unaffected. Verified on Apple Internal Keyboard (SPI)
+// and Magic Keyboard (Bluetooth), with and without a Caps->Ctrl remap.
 //
 // One binary, two faces:
 //   no arguments  -> menu bar app (LSUIElement), owns the LEDs
 //   arguments     -> CLI, used by Claude Code hooks and by you
 //
-// Hooks report *events*; the app decides what they mean, because the blink mode is
-// switched in the menu at runtime while settings.json stays static.
+// The logic worth testing lives in Core.swift; this file is the AppKit and IOKit shell.
 
 import AppKit
+import Darwin
 import Foundation
 import IOKit
 import IOKit.hid
@@ -20,195 +20,7 @@ import ServiceManagement
 
 let githubURL = "https://github.com/odiumuniverse/claudeled"
 
-// MARK: - paths
-
-let home = FileManager.default.homeDirectoryForCurrentUser
-let baseDir = home.appendingPathComponent(".config/claudeled", isDirectory: true)
-let stateDir = baseDir.appendingPathComponent("sessions", isDirectory: true)
-let configURL = baseDir.appendingPathComponent("config.json")
-
-/// Backstop for sessions we could not tie to a process. The pid check does the real work.
-let staleTTL: TimeInterval = 12 * 3600
-
-func ensureDirs() {
-    try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
-}
-
-// MARK: - model
-
-/// What a hook told us last about a session.
-enum SessionEvent: String {
-    case prompt   // UserPromptSubmit -- you handed work to Claude
-    case stop     // Stop -- Claude finished its turn, the ball is yours
-    case notify   // Notification -- Claude is blocked on a permission prompt
-}
-
-enum BlinkMode: String, Codable, CaseIterable {
-    case waiting   // blink while Claude waits on you
-    case working   // blink while Claude is busy
-
-    var title: String {
-        switch self {
-        case .waiting: return "Blink while Claude waits for me"
-        case .working: return "Blink while Claude is working"
-        }
-    }
-
-    /// Events that mean "blink" in this mode.
-    var activeEvents: Set<SessionEvent> {
-        switch self {
-        case .waiting: return [.stop, .notify]
-        case .working: return [.prompt]
-        }
-    }
-
-    var pattern: [Int] {
-        switch self {
-        // double pulse, mostly dark -- noticeable without being a strobe
-        case .waiting: return [120, 120, 120, 900]
-        // Claude works for minutes at a stretch, so this one stays discreet
-        case .working: return [100, 1900]
-        }
-    }
-}
-
-struct Config: Codable {
-    /// Exact product names. Empty means "every keyboard that has a caps LED".
-    var keyboards: [String] = []
-    var mode: BlinkMode = .waiting
-
-    static func load() -> Config {
-        guard let data = try? Data(contentsOf: configURL),
-              let cfg = try? JSONDecoder().decode(Config.self, from: data) else { return Config() }
-        return cfg
-    }
-
-    func save() {
-        ensureDirs()
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try? enc.encode(self).write(to: configURL)
-    }
-
-    func selects(_ name: String) -> Bool {
-        keyboards.isEmpty || keyboards.contains(name)
-    }
-}
-
-// MARK: - Claude Code hooks
-
-/// Installs itself into ~/.claude/settings.json. The file belongs to the user and
-/// usually holds unrelated hooks, so every write is a merge: unknown keys are
-/// preserved, our entries are matched by command path and never duplicated.
-enum Hooks {
-    /// Event name in settings.json -> argument we want passed to `claudeled hook`.
-    static let events: [(claudeEvent: String, argument: String)] = [
-        ("UserPromptSubmit", "prompt"),
-        ("Stop", "stop"),
-        ("Notification", "notify"),
-        // A tool ran, so whatever the notification was blocking on is resolved. Without
-        // this the light keeps blinking after you approve a permission prompt, all the
-        // way until your next message.
-        ("PostToolUse", "prompt"),
-        ("SessionEnd", "end"),
-        // SubagentStop is deliberately absent: it is what keeps subagents from
-        // blinking the light on behalf of the main agent.
-    ]
-
-    static let settingsURL = home.appendingPathComponent(".claude/settings.json")
-
-    /// Absolute path into the bundle. `claudeled` alone would depend on the PATH that
-    /// Claude Code happens to run hooks with, which is not ours to assume.
-    static var executable: String {
-        Bundle.main.executablePath ?? CommandLine.arguments[0]
-    }
-
-    private static func command(_ argument: String) -> String {
-        "\"\(executable)\" hook \(argument)"
-    }
-
-    private static func load() -> [String: Any] {
-        guard let data = try? Data(contentsOf: settingsURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return [:] }
-        return json
-    }
-
-    private static func write(_ settings: [String: Any]) throws {
-        let data = try JSONSerialization.data(
-            withJSONObject: settings, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
-        try FileManager.default.createDirectory(
-            at: settingsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try data.write(to: settingsURL, options: .atomic)
-    }
-
-    /// True when every event we need already points at this executable.
-    static var installed: Bool {
-        let hooks = load()["hooks"] as? [String: Any] ?? [:]
-        return events.allSatisfy { event in
-            guard let groups = hooks[event.claudeEvent] as? [[String: Any]] else { return false }
-            return groups.contains { group in
-                guard let entries = group["hooks"] as? [[String: Any]] else { return false }
-                return entries.contains { ($0["command"] as? String)?.contains(executable) == true }
-            }
-        }
-    }
-
-    /// Keeps a one-time backup so a bad merge is always recoverable.
-    private static func backupOnce() {
-        let backup = settingsURL.appendingPathExtension("claudeled-backup")
-        guard FileManager.default.fileExists(atPath: settingsURL.path),
-              !FileManager.default.fileExists(atPath: backup.path) else { return }
-        try? FileManager.default.copyItem(at: settingsURL, to: backup)
-    }
-
-    static func install() throws {
-        backupOnce()
-        var settings = load()
-        var hooks = settings["hooks"] as? [String: Any] ?? [:]
-
-        for event in events {
-            var groups = hooks[event.claudeEvent] as? [[String: Any]] ?? []
-            // Drop any entry of ours first: the bundle may have moved since last time.
-            groups = groups.compactMap { group -> [String: Any]? in
-                guard var entries = group["hooks"] as? [[String: Any]] else { return group }
-                entries.removeAll { ($0["command"] as? String)?.contains("claudeled") == true }
-                if entries.isEmpty { return nil }
-                var updated = group
-                updated["hooks"] = entries
-                return updated
-            }
-            groups.append(["hooks": [["type": "command", "command": command(event.argument)]]])
-            hooks[event.claudeEvent] = groups
-        }
-
-        settings["hooks"] = hooks
-        try write(settings)
-    }
-
-    static func remove() throws {
-        var settings = load()
-        guard var hooks = settings["hooks"] as? [String: Any] else { return }
-        for event in events {
-            guard var groups = hooks[event.claudeEvent] as? [[String: Any]] else { continue }
-            groups = groups.compactMap { group -> [String: Any]? in
-                guard var entries = group["hooks"] as? [[String: Any]] else { return group }
-                entries.removeAll { ($0["command"] as? String)?.contains("claudeled") == true }
-                if entries.isEmpty { return nil }
-                var updated = group
-                updated["hooks"] = entries
-                return updated
-            }
-            if groups.isEmpty { hooks.removeValue(forKey: event.claudeEvent) }
-            else { hooks[event.claudeEvent] = groups }
-        }
-        if hooks.isEmpty { settings.removeValue(forKey: "hooks") }
-        else { settings["hooks"] = hooks }
-        try write(settings)
-    }
-}
-
-// MARK: - process helpers
+// MARK: - finding the session that owns a hook
 
 func parentOf(_ pid: pid_t) -> pid_t? {
     var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
@@ -241,13 +53,12 @@ func claudeAncestor() -> pid_t {
         let name = (path as NSString).lastPathComponent
 
         // A native install lives under .../claude/versions/<version>, so the directory
-        // carries the name even though the executable is called after the version.
-        let components = path.split(separator: "/").map(String.init)
-        if components.contains("claude") || name.lowercased().hasPrefix("claude") {
+        // carries the name even though the executable is named after the version.
+        if path.split(separator: "/").contains("claude") || name.lowercased().hasPrefix("claude") {
             return pid
         }
         // Fallback for installs launched through node: the first ancestor that is not a
-        // shell is the thing that spawned the hook, which is Claude Code.
+        // shell is whatever spawned the hook, which is Claude Code.
         if firstNonShell == 0, !shellNames.contains(name), !name.isEmpty {
             firstNonShell = pid
         }
@@ -257,59 +68,55 @@ func claudeAncestor() -> pid_t {
     return firstNonShell
 }
 
-func isAlive(_ pid: pid_t) -> Bool {
-    pid > 0 && (kill(pid, 0) == 0 || errno == EPERM)
-}
+// MARK: - settings.json
 
-// MARK: - session state
+enum Hooks {
+    static let settingsURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".claude/settings.json")
 
-struct Session {
-    let id: String
-    let pid: pid_t
-    let event: SessionEvent
-    let at: Date
-}
+    /// Absolute path into the bundle. Bare `claudeled` would depend on whatever PATH
+    /// Claude Code happens to run hooks with, which is not ours to assume.
+    static var executable: String {
+        Bundle.main.executablePath ?? CommandLine.arguments[0]
+    }
 
-func readSessions() -> [Session] {
-    guard let files = try? FileManager.default.contentsOfDirectory(at: stateDir,
-                                                                   includingPropertiesForKeys: nil)
-    else { return [] }
-    return files.compactMap { url in
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-        let lines = text.split(separator: "\n").map(String.init)
-        guard lines.count >= 3,
-              let pid = pid_t(lines[0]),
-              let stamp = TimeInterval(lines[1]),
-              let event = SessionEvent(rawValue: lines[2]) else { return nil }
-        return Session(id: url.lastPathComponent, pid: pid, event: event,
-                       at: Date(timeIntervalSince1970: stamp))
+    private static func load() -> [String: Any] {
+        guard let data = try? Data(contentsOf: settingsURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return [:] }
+        return json
+    }
+
+    private static func write(_ settings: [String: Any]) throws {
+        let data = try JSONSerialization.data(
+            withJSONObject: settings,
+            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+        try FileManager.default.createDirectory(
+            at: settingsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try data.write(to: settingsURL, options: .atomic)
+    }
+
+    /// One-time backup, so a bad merge is always recoverable.
+    private static func backupOnce() {
+        let backup = settingsURL.appendingPathExtension("claudeled-backup")
+        guard FileManager.default.fileExists(atPath: settingsURL.path),
+              !FileManager.default.fileExists(atPath: backup.path) else { return }
+        try? FileManager.default.copyItem(at: settingsURL, to: backup)
+    }
+
+    static var installed: Bool { HookPlan.installed(in: load(), executable: executable) }
+
+    static func install() throws {
+        backupOnce()
+        try write(HookPlan.install(into: load(), executable: executable))
+    }
+
+    static func remove() throws {
+        try write(HookPlan.remove(from: load()))
     }
 }
 
-/// Drops sessions whose process is gone, or that outlived the TTL. This is what keeps a
-/// kill -9'd terminal from blinking forever.
-func pruneSessions() {
-    let now = Date()
-    for s in readSessions() {
-        let dead = s.pid != 0 && !isAlive(s.pid)
-        let stale = now.timeIntervalSince(s.at) > staleTTL
-        if dead || stale {
-            try? FileManager.default.removeItem(at: stateDir.appendingPathComponent(s.id))
-        }
-    }
-}
-
-func record(session: String, event: SessionEvent) {
-    ensureDirs()
-    let body = "\(claudeAncestor())\n\(Date().timeIntervalSince1970)\n\(event.rawValue)\n"
-    try? body.write(to: stateDir.appendingPathComponent(session), atomically: true, encoding: .utf8)
-}
-
-func forget(_ session: String) {
-    try? FileManager.default.removeItem(at: stateDir.appendingPathComponent(session))
-}
-
-// MARK: - keyboards
+// MARK: - HID
 
 struct KeyboardInfo {
     let device: IOHIDDevice
@@ -323,34 +130,36 @@ struct KeyboardInfo {
 
 enum HID {
     static func capsElement(_ device: IOHIDDevice) -> IOHIDElement? {
-        let elems = (IOHIDDeviceCopyMatchingElements(
+        let elements = (IOHIDDeviceCopyMatchingElements(
             device, [kIOHIDElementUsagePageKey: Int(kHIDPage_LEDs)] as CFDictionary, 0)
             as? [IOHIDElement]) ?? []
-        return elems.first { IOHIDElementGetUsage($0) == UInt32(kHIDUsage_LED_CapsLock) }
+        return elements.first { IOHIDElementGetUsage($0) == UInt32(kHIDUsage_LED_CapsLock) }
     }
 
     static func describe(_ device: IOHIDDevice) -> KeyboardInfo {
-        func prop<T>(_ key: String) -> T? { IOHIDDeviceGetProperty(device, key as CFString) as? T }
+        func property<T>(_ key: String) -> T? {
+            IOHIDDeviceGetProperty(device, key as CFString) as? T
+        }
         return KeyboardInfo(
             device: device,
             element: capsElement(device),
-            name: prop(kIOHIDProductKey) ?? "Unknown keyboard",
-            vendor: prop(kIOHIDVendorIDKey) ?? -1,
-            product: prop(kIOHIDProductIDKey) ?? -1,
-            transport: prop(kIOHIDTransportKey) ?? "?")
+            name: property(kIOHIDProductKey) ?? "Unknown keyboard",
+            vendor: property(kIOHIDVendorIDKey) ?? -1,
+            product: property(kIOHIDProductIDKey) ?? -1,
+            transport: property(kIOHIDTransportKey) ?? "?")
     }
 
-    static func matchingDict() -> CFArray {
+    static var keyboardMatch: CFArray {
         [[kIOHIDDeviceUsagePageKey: kHIDPage_GenericDesktop,
           kIOHIDDeviceUsageKey: kHIDUsage_GD_Keyboard]] as CFArray
     }
 
-    /// One-shot enumeration for the CLI.
+    /// One-shot enumeration, for the CLI.
     static func enumerate() -> [KeyboardInfo] {
-        let mgr = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        IOHIDManagerSetDeviceMatchingMultiple(mgr, matchingDict())
-        IOHIDManagerOpen(mgr, IOOptionBits(kIOHIDOptionsTypeNone))
-        let devices = (IOHIDManagerCopyDevices(mgr) as? Set<IOHIDDevice>) ?? []
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        IOHIDManagerSetDeviceMatchingMultiple(manager, keyboardMatch)
+        IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        let devices = (IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice>) ?? []
         return devices.map(describe).sorted { $0.name < $1.name }
     }
 }
@@ -359,31 +168,26 @@ enum HID {
 /// receiver unplugs are handled without polling.
 final class KeyboardRegistry {
     private let lock = NSLock()
-    private var open: [(device: IOHIDDevice, element: IOHIDElement, name: String)] = []
+    private var open: [(device: IOHIDDevice, element: IOHIDElement)] = []
     private var known: [IOHIDDevice] = []
     private var manager: IOHIDManager?
-    private var config = Config.load()
-
-    var selectedNames: [String] {
-        lock.lock(); defer { lock.unlock() }
-        return open.map(\.name)
-    }
 
     func start() {
-        let mgr = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
-        IOHIDManagerSetDeviceMatchingMultiple(mgr, HID.matchingDict())
-        let ctx = Unmanaged.passUnretained(self).toOpaque()
-        IOHIDManagerRegisterDeviceMatchingCallback(mgr, { ctx, _, _, device in
-            guard let ctx else { return }
-            Unmanaged<KeyboardRegistry>.fromOpaque(ctx).takeUnretainedValue().attach(device)
-        }, ctx)
-        IOHIDManagerRegisterDeviceRemovalCallback(mgr, { ctx, _, _, device in
-            guard let ctx else { return }
-            Unmanaged<KeyboardRegistry>.fromOpaque(ctx).takeUnretainedValue().detach(device)
-        }, ctx)
-        IOHIDManagerScheduleWithRunLoop(mgr, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
-        IOHIDManagerOpen(mgr, IOOptionBits(kIOHIDOptionsTypeNone))
-        manager = mgr
+        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        IOHIDManagerSetDeviceMatchingMultiple(manager, HID.keyboardMatch)
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        IOHIDManagerRegisterDeviceMatchingCallback(manager, { context, _, _, device in
+            guard let context else { return }
+            Unmanaged<KeyboardRegistry>.fromOpaque(context).takeUnretainedValue().attach(device)
+        }, context)
+        IOHIDManagerRegisterDeviceRemovalCallback(manager, { context, _, _, device in
+            guard let context else { return }
+            Unmanaged<KeyboardRegistry>.fromOpaque(context).takeUnretainedValue().detach(device)
+        }, context)
+        IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(),
+                                        CFRunLoopMode.defaultMode.rawValue)
+        IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+        self.manager = manager
     }
 
     private func attach(_ device: IOHIDDevice) {
@@ -400,27 +204,27 @@ final class KeyboardRegistry {
         lock.unlock()
     }
 
-    /// Called on config changes too, so ticking a keyboard in the menu takes effect at once.
+    /// Also called when the selection changes, so ticking a keyboard takes effect at once.
     func reopen() {
-        let cfg = Config.load()
+        let config = Config.load()
         lock.lock()
-        config = cfg
         for entry in open {
-            setLED(entry, on: false)
+            write(entry, on: false)
             IOHIDDeviceClose(entry.device, 0)
         }
         open.removeAll()
         for device in known {
             let info = HID.describe(device)
-            guard let element = info.element, cfg.selects(info.name) else { continue }
-            guard IOHIDDeviceOpen(device, 0) == kIOReturnSuccess else { continue }
-            open.append((device, element, info.name))
+            guard let element = info.element, config.selects(info.name),
+                  IOHIDDeviceOpen(device, 0) == kIOReturnSuccess else { continue }
+            open.append((device, element))
         }
         lock.unlock()
     }
 
-    private func setLED(_ entry: (device: IOHIDDevice, element: IOHIDElement, name: String), on: Bool) {
-        let value = IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, entry.element, 0, on ? 1 : 0)
+    private func write(_ entry: (device: IOHIDDevice, element: IOHIDElement), on: Bool) {
+        let value = IOHIDValueCreateWithIntegerValue(
+            kCFAllocatorDefault, entry.element, 0, on ? 1 : 0)
         IOHIDDeviceSetValue(entry.device, entry.element, value)
     }
 
@@ -428,10 +232,10 @@ final class KeyboardRegistry {
         lock.lock()
         let snapshot = open
         lock.unlock()
-        for entry in snapshot { setLED(entry, on: on) }
+        for entry in snapshot { write(entry, on: on) }
     }
 
-    /// All keyboards seen so far, whether or not they are selected. Menu uses this.
+    /// Every keyboard seen so far, selected or not. The menu lists these.
     func inventory() -> [KeyboardInfo] {
         lock.lock()
         let devices = known
@@ -449,11 +253,6 @@ final class Blinker {
 
     init(registry: KeyboardRegistry) { self.registry = registry }
 
-    var isActive: Bool {
-        let cfg = Config.load()
-        return readSessions().contains { cfg.mode.activeEvents.contains($0.event) }
-    }
-
     func stop() {
         running = false
         registry.set(false)
@@ -467,17 +266,15 @@ final class Blinker {
                     pruneSessions()
                     lastPrune = Date()
                 }
-                let cfg = Config.load()
-                let active = readSessions().contains { cfg.mode.activeEvents.contains($0.event) }
-                guard active else {
+                guard shouldBlink(sessions: readSessions()) else {
                     registry.set(false)
                     Thread.sleep(forTimeInterval: 0.25)
                     continue
                 }
-                for (index, ms) in cfg.mode.pattern.enumerated() {
+                for (index, milliseconds) in blinkPattern.enumerated() {
                     guard running else { break }
                     registry.set(index % 2 == 0)
-                    Thread.sleep(forTimeInterval: Double(ms) / 1000)
+                    Thread.sleep(forTimeInterval: Double(milliseconds) / 1000)
                 }
                 registry.set(false)
             }
@@ -485,7 +282,7 @@ final class Blinker {
     }
 }
 
-// MARK: - menu bar app
+// MARK: - menu bar
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
@@ -501,8 +298,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
 
-        // The app is useless without hooks, so install them on launch. Idempotent, and
-        // it re-points them if the bundle moved since last run.
+        // The app does nothing without hooks, so install them on launch. Idempotent, and
+        // it re-points them if the bundle has moved since last run.
         if !Hooks.installed {
             do { try Hooks.install() }
             catch { NSLog("claudeled: could not install hooks: \(error)") }
@@ -520,63 +317,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Rebuilt on every open: keyboards come and go, and so does the waiting state.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        let cfg = Config.load()
+        let config = Config.load()
 
-        let waiting = readSessions().filter { cfg.mode.activeEvents.contains($0.event) }.count
-        let status = waiting == 0 ? "Idle" : "\(waiting) session\(waiting == 1 ? "" : "s") waiting"
-        let header = NSMenuItem(title: status, action: nil, keyEquivalent: "")
+        let waiting = readSessions().filter { blinkingEvents.contains($0.event) }.count
+        let header = NSMenuItem(
+            title: waiting == 0 ? "No session waiting"
+                                : "\(waiting) session\(waiting == 1 ? "" : "s") waiting",
+            action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
         menu.addItem(.separator())
 
-        for mode in BlinkMode.allCases {
-            let item = NSMenuItem(title: mode.title, action: #selector(pickMode(_:)), keyEquivalent: "")
-            item.target = self
-            item.state = cfg.mode == mode ? .on : .off
-            item.representedObject = mode.rawValue
-            menu.addItem(item)
-        }
-        menu.addItem(.separator())
-
-        let kbHeader = NSMenuItem(title: "Keyboards", action: nil, keyEquivalent: "")
-        kbHeader.isEnabled = false
-        menu.addItem(kbHeader)
+        let keyboardHeader = NSMenuItem(title: "Blink on", action: nil, keyEquivalent: "")
+        keyboardHeader.isEnabled = false
+        menu.addItem(keyboardHeader)
 
         let inventory = registry.inventory()
         if inventory.isEmpty {
-            let none = NSMenuItem(title: "  none detected", action: nil, keyEquivalent: "")
+            let none = NSMenuItem(title: "no keyboards detected", action: nil, keyEquivalent: "")
             none.isEnabled = false
             menu.addItem(none)
         }
-        for kb in inventory {
-            let item = NSMenuItem(title: kb.name, action: #selector(toggleKeyboard(_:)), keyEquivalent: "")
+        for keyboard in inventory {
+            let item = NSMenuItem(title: keyboard.name, action: #selector(toggleKeyboard(_:)),
+                                  keyEquivalent: "")
             item.target = self
-            item.representedObject = kb.name
-            if kb.drivable {
-                item.state = cfg.selects(kb.name) ? .on : .off
+            item.representedObject = keyboard.name
+            if keyboard.drivable {
+                item.state = config.selects(keyboard.name) ? .on : .off
             } else {
-                // No caps LED element: nothing to drive, so do not pretend it is a choice.
-                item.isEnabled = false
-                item.title = "\(kb.name) (no caps LED)"
+                // No caps LED: nothing to drive, so do not pretend it is a choice.
+                item.action = nil
+                item.title = "\(keyboard.name) — no caps LED"
             }
             menu.addItem(item)
         }
         menu.addItem(.separator())
 
         let hooksInstalled = Hooks.installed
-        let hooksItem = NSMenuItem(
+        let hooks = NSMenuItem(
             title: hooksInstalled ? "Claude Code hooks installed" : "Install Claude Code hooks",
             action: #selector(toggleHooks(_:)), keyEquivalent: "")
-        hooksItem.target = self
-        hooksItem.state = hooksInstalled ? .on : .off
-        menu.addItem(hooksItem)
+        hooks.target = self
+        hooks.state = hooksInstalled ? .on : .off
+        menu.addItem(hooks)
 
-        let login = NSMenuItem(title: "Start at login", action: #selector(toggleLogin(_:)), keyEquivalent: "")
+        let login = NSMenuItem(title: "Start at login", action: #selector(toggleLogin(_:)),
+                               keyEquivalent: "")
         login.target = self
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
 
-        let github = NSMenuItem(title: "Visit GitHub", action: #selector(openGitHub), keyEquivalent: "")
+        menu.addItem(.separator())
+
+        let github = NSMenuItem(title: "Visit GitHub", action: #selector(openGitHub),
+                                keyEquivalent: "")
         github.target = self
         menu.addItem(github)
 
@@ -585,29 +380,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(quit)
     }
 
-    @objc private func pickMode(_ sender: NSMenuItem) {
-        guard let raw = sender.representedObject as? String,
-              let mode = BlinkMode(rawValue: raw) else { return }
-        var cfg = Config.load()
-        cfg.mode = mode
-        cfg.save()
+    /// AppKit closes a menu as soon as an item is chosen. For tick boxes that is the
+    /// wrong feel -- you want to see the tick land, and tick a second keyboard without
+    /// reopening. Reopening immediately is the only way to keep a stock NSMenu up.
+    private func reopenMenu() {
+        DispatchQueue.main.async { [weak self] in
+            self?.statusItem.button?.performClick(nil)
+        }
     }
 
     @objc private func toggleKeyboard(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
-        var cfg = Config.load()
+        var config = Config.load()
         let drivable = registry.inventory().filter(\.drivable).map(\.name)
-        // Empty means "all", so materialise the real list before removing one from it.
-        var selected = cfg.keyboards.isEmpty ? drivable : cfg.keyboards
-        if selected.contains(name) {
-            selected.removeAll { $0 == name }
-        } else {
-            selected.append(name)
-        }
-        // Everything selected collapses back to "all", so newly plugged keyboards join in.
-        cfg.keyboards = Set(selected) == Set(drivable) ? [] : selected
-        cfg.save()
+        config.keyboards = Selection.toggle(name, current: config.keyboards, drivable: drivable)
+        config.save()
         registry.reopen()
+        reopenMenu()
     }
 
     @objc private func toggleHooks(_ sender: NSMenuItem) {
@@ -619,6 +408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             alert.informativeText = "\(error)"
             alert.runModal()
         }
+        reopenMenu()
     }
 
     @objc private func toggleLogin(_ sender: NSMenuItem) {
@@ -631,6 +421,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch {
             NSLog("claudeled: login item toggle failed: \(error)")
         }
+        reopenMenu()
     }
 
     @objc private func openGitHub() {
@@ -645,25 +436,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
 // MARK: - CLI
 
-func out(_ s: String) { print(s) }
-
 func cliDevices(namesOnly: Bool) {
-    let cfg = Config.load()
+    let config = Config.load()
     let keyboards = HID.enumerate()
     if namesOnly {
         // Consumed by shell completion: one name per line, nothing else.
-        for kb in keyboards where kb.drivable { out(kb.name) }
+        for keyboard in keyboards where keyboard.drivable { print(keyboard.name) }
         return
     }
-    if keyboards.isEmpty { out("no keyboards found"); return }
-    out("mode: \(cfg.mode.rawValue)")
-    out(cfg.keyboards.isEmpty ? "keyboards: all" : "keyboards: \(cfg.keyboards.joined(separator: ", "))")
-    out("")
-    for kb in keyboards {
-        let mark = kb.drivable ? (cfg.selects(kb.name) ? "[x]" : "[ ]") : "[-]"
-        out("\(mark) \(kb.name)")
-        out("    vid=\(kb.vendor) pid=\(kb.product) transport=\(kb.transport) " +
-            "capsLED=\(kb.drivable ? "yes" : "no")")
+    guard !keyboards.isEmpty else { print("no keyboards found"); return }
+    print(config.keyboards.isEmpty
+          ? "blinking on: all keyboards"
+          : "blinking on: \(config.keyboards.joined(separator: ", "))")
+    print("")
+    for keyboard in keyboards {
+        let mark = keyboard.drivable ? (config.selects(keyboard.name) ? "[x]" : "[ ]") : "[-]"
+        print("\(mark) \(keyboard.name)")
+        print("    vid=\(keyboard.vendor) pid=\(keyboard.product) " +
+              "transport=\(keyboard.transport) capsLED=\(keyboard.drivable ? "yes" : "no")")
     }
 }
 
@@ -672,43 +462,44 @@ func cliTest(_ query: String) {
         query.isEmpty || $0.name.lowercased().contains(query.lowercased())
     }
     guard !matches.isEmpty else {
-        out("no keyboard matching '\(query)'")
+        print("no keyboard matching '\(query)'")
         exit(1)
     }
-    for kb in matches {
-        guard let element = kb.element else {
-            out("\(kb.name): no caps LED, cannot be driven")
+    for keyboard in matches {
+        guard let element = keyboard.element else {
+            print("\(keyboard.name): no caps LED, cannot be driven")
             continue
         }
-        guard IOHIDDeviceOpen(kb.device, 0) == kIOReturnSuccess else {
-            out("\(kb.name): open failed")
+        guard IOHIDDeviceOpen(keyboard.device, 0) == kIOReturnSuccess else {
+            print("\(keyboard.name): open failed")
             continue
         }
-        out("\(kb.name): LED on for 3s, watch it")
+        print("\(keyboard.name): LED on for 3s, watch it")
         // Re-assert: a single write fades on some Bluetooth keyboards.
         let deadline = Date().addingTimeInterval(3)
         while Date() < deadline {
-            IOHIDDeviceSetValue(kb.device, element,
+            IOHIDDeviceSetValue(keyboard.device, element,
                 IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, element, 0, 1))
             Thread.sleep(forTimeInterval: 0.05)
         }
-        IOHIDDeviceSetValue(kb.device, element,
+        IOHIDDeviceSetValue(keyboard.device, element,
             IOHIDValueCreateWithIntegerValue(kCFAllocatorDefault, element, 0, 0))
-        IOHIDDeviceClose(kb.device, 0)
+        IOHIDDeviceClose(keyboard.device, 0)
     }
 }
 
 func cliStatus() {
-    let cfg = Config.load()
-    out("mode: \(cfg.mode.rawValue) (\(cfg.mode.title))")
     let sessions = readSessions()
-    if sessions.isEmpty { out("no sessions tracked"); return }
-    let fmt = DateFormatter()
-    fmt.dateFormat = "HH:mm:ss"
-    for s in sessions.sorted(by: { $0.at < $1.at }) {
-        let blinking = cfg.mode.activeEvents.contains(s.event) ? "BLINKING" : "quiet"
-        let proc = s.pid == 0 ? "pid unknown" : (isAlive(s.pid) ? "pid \(s.pid)" : "pid \(s.pid) DEAD")
-        out("\(s.id)  \(s.event.rawValue)  \(fmt.string(from: s.at))  \(proc)  \(blinking)")
+    guard !sessions.isEmpty else { print("no sessions tracked"); return }
+    let formatter = DateFormatter()
+    formatter.dateFormat = "HH:mm:ss"
+    for session in sessions.sorted(by: { $0.at < $1.at }) {
+        let blinking = blinkingEvents.contains(session.event) ? "BLINKING" : "quiet"
+        let process = session.pid == 0
+            ? "pid unknown"
+            : (isAlive(session.pid) ? "pid \(session.pid)" : "pid \(session.pid) DEAD")
+        print("\(session.id)  \(session.event.rawValue)  " +
+              "\(formatter.string(from: session.at))  \(process)  \(blinking)")
     }
 }
 
@@ -717,13 +508,11 @@ func cliHook(_ eventName: String) {
     let data = FileHandle.standardInput.readDataToEndOfFile()
     guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
           let raw = json["session_id"] as? String, !raw.isEmpty else { exit(0) }
-    // session_id becomes a filename.
-    let session = raw.replacingOccurrences(of: "/", with: "_")
-        .replacingOccurrences(of: "..", with: "_")
+    let session = safeSessionID(raw)
     if eventName == "end" {
         forget(session)
     } else if let event = SessionEvent(rawValue: eventName) {
-        record(session: session, event: event)
+        record(session: session, event: event, pid: claudeAncestor())
     }
     exit(0)
 }
@@ -732,31 +521,34 @@ let usage = """
 claudeled -- Caps Lock LED indicator for Claude Code
 
   claudeled                    run the menu bar app
-  claudeled devices            list keyboards and which are selected
+  claudeled devices            list keyboards and which ones blink
   claudeled devices --names    names only, for shell completion
   claudeled test <keyboard>    light a keyboard for 3s
-  claudeled status             show tracked sessions and the current mode
-  claudeled hooks              print the Claude Code hook config to install
-  claudeled hook <event>       internal: called by hooks (prompt|stop|notify|end)
+  claudeled status             show tracked sessions
+  claudeled hooks              print the hook config, to install it by hand
+  claudeled hook <event>       internal: called by the hooks themselves
 
 config: ~/.config/claudeled/config.json
 """
 
-let hookConfig = """
-Add to ~/.claude/settings.json (merge with existing hooks):
+var hookConfig: String {
+    let lines = HookPlan.events.map { event in
+        "    \"\(event.claudeEvent)\": [{\"hooks\": [{\"type\": \"command\", " +
+        "\"command\": \"\(HookPlan.command(executable: Hooks.executable, argument: event.argument))\"}]}]"
+    }
+    return """
+    Merge into ~/.claude/settings.json:
 
-{
-  "hooks": {
-    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "claudeled hook prompt"}]}],
-    "Stop":             [{"hooks": [{"type": "command", "command": "claudeled hook stop"}]}],
-    "Notification":     [{"hooks": [{"type": "command", "command": "claudeled hook notify"}]}],
-    "SessionEnd":       [{"hooks": [{"type": "command", "command": "claudeled hook end"}]}]
-  }
+    {
+      "hooks": {
+    \(lines.joined(separator: ",\n"))
+      }
+    }
+
+    SubagentStop is deliberately absent: it is what keeps subagents from
+    blinking the light on behalf of the main agent.
+    """
 }
-
-SubagentStop is deliberately absent: that is what keeps subagents from
-blinking the light on behalf of the main agent.
-"""
 
 let arguments = Array(CommandLine.arguments.dropFirst())
 switch arguments.first {
@@ -766,20 +558,14 @@ case nil:
     app.delegate = delegate
     app.setActivationPolicy(.accessory)  // menu bar only, no Dock icon
     app.run()
-case "devices":
-    cliDevices(namesOnly: arguments.contains("--names"))
-case "test":
-    cliTest(arguments.count > 1 ? arguments[1] : "")
-case "status":
-    cliStatus()
-case "hooks":
-    out(hookConfig)
-case "hook":
-    cliHook(arguments.count > 1 ? arguments[1] : "")
-case "-h", "--help", "help":
-    out(usage)
+case "devices": cliDevices(namesOnly: arguments.contains("--names"))
+case "test":    cliTest(arguments.count > 1 ? arguments[1] : "")
+case "status":  cliStatus()
+case "hooks":   print(hookConfig)
+case "hook":    cliHook(arguments.count > 1 ? arguments[1] : "")
+case "-h", "--help", "help": print(usage)
 default:
-    out("unknown command: \(arguments[0])\n")
-    out(usage)
+    print("unknown command: \(arguments[0])\n")
+    print(usage)
     exit(2)
 }
