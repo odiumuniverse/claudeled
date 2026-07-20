@@ -145,6 +145,45 @@ try? FileManager.default.removeItem(at: sessionsDir.appendingPathComponent("brok
 equal(safeSessionID("../../etc/passwd"), "_/_/etc/passwd".replacingOccurrences(of: "/", with: "_"),
       "a session id cannot escape its directory")
 
+// MARK: - event log
+
+section("event log")
+
+let day: TimeInterval = 24 * 3600
+let noon = Date(timeIntervalSince1970: 1_752_926_400)   // 2025-07-19 12:00 UTC
+
+logEvent(session: "s1", event: .prompt, project: "claudeled", at: noon)
+logEvent(session: "s1", event: .stop, project: "claudeled", at: noon + 30)
+logEvent(session: "s2", event: .notify, project: "topscan", at: noon + 60)
+
+let logged = readEvents(from: noon - day, to: noon + day)
+equal(logged.count, 3, "every appended event is read back")
+equal(logged.map(\.e), [.prompt, .stop, .notify], "events come back in time order")
+equal(logged.first?.p, "claudeled", "the project survives the round trip")
+
+equal(readEvents(from: noon + 40, to: noon + day).count, 1,
+      "the window excludes events outside it")
+equal(readEvents(from: noon + 10 * 365 * day).count, 0,
+      "a window with no data reads as empty, not as everything")
+
+let logFile = eventsDir.appendingPathComponent(monthFile(for: noon))
+if let handle = try? FileHandle(forWritingTo: logFile) {
+    handle.seekToEndOfFile()
+    handle.write(Data("{\"t\":1,\"s\":\"tor\n".utf8))
+    try? handle.close()
+}
+equal(readEvents(from: noon - day, to: noon + day).count, 3,
+      "a torn line is skipped rather than costing the whole report")
+
+equal(monthFile(for: noon), "2025-07.jsonl", "log files are named by month")
+equal(monthsSpanned(from: noon, to: noon + 30 * day), ["2025-07.jsonl", "2025-08.jsonl"],
+      "a window spanning a month boundary reads both files")
+
+equal(projectName(cwd: "/Users/someone/work/acme-secret"), "acme-secret",
+      "only the last path component is kept, never the full path")
+equal(projectName(cwd: nil), "unknown", "a hook without a cwd still logs")
+equal(projectName(cwd: "/"), "unknown", "the root directory has no useful name")
+
 // MARK: - hook merging
 //
 // This one writes to the user's settings.json in production, so it gets the most care.

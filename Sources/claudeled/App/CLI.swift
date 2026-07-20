@@ -81,6 +81,8 @@ func cliHook(_ eventName: String) {
         forget(session)
     } else if let event = SessionEvent(rawValue: eventName) {
         record(session: session, event: event, pid: claudeAncestor())
+        logEvent(session: session, event: event,
+                 project: projectName(cwd: json["cwd"] as? String))
     }
     exit(0)
 }

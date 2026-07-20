@@ -3,7 +3,7 @@
 import Foundation
 
 /// What a hook last told us about a session.
-enum SessionEvent: String {
+enum SessionEvent: String, Codable {
     case prompt   // work handed to Claude, or a tool just ran
     case stop     // Claude finished its turn, the ball is yours
     case notify   // Claude is blocked on a permission prompt
