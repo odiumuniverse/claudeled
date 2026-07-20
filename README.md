@@ -1,5 +1,7 @@
 # claudeled
 
+[![CI](https://github.com/odiumuniverse/claudeled/actions/workflows/ci.yml/badge.svg)](https://github.com/odiumuniverse/claudeled/actions/workflows/ci.yml)
+
 Blinks the Caps Lock LED on your keyboards while a Claude Code session is waiting
 for you. Handles several sessions in several windows at once, lets you pick which
 keyboards light up and how long they keep blinking, and — since the same hooks
@@ -82,6 +84,16 @@ log, the statistics, the `settings.json` merge. It imports neither AppKit nor IO
 checks, no framework and no fixtures — one binary that prints what it verified and
 exits non-zero when something breaks. Because only `Core/` is compiled in, logic that
 needs a test has to live there.
+
+CI runs on every pull request and every push to `master`: the tests, a build with
+`-warnings-as-errors`, SwiftLint, a syntax check of the zsh completion, and the full
+`make release` path — which is the only thing that proves the icon still draws, since
+`Resources/claudeled.icns` is generated rather than committed. The packaged zip is
+attached to each run, so a pull request can be downloaded and run rather than trusted.
+
+`.swiftlint.yml` records where the house style and SwiftLint's defaults disagree, with
+the reason for each — short argument labels like `to:` and `at:`, aligned `if`/`else`
+pairs, trailing commas in multi-line literals.
 
 ## Menu
 
