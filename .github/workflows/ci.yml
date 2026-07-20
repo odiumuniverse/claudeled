@@ -31,8 +31,14 @@ jobs:
           swiftc -O Sources/claudeled/Core/*.swift Sources/claudeled/App/*.swift \
             -warnings-as-errors -o "$RUNNER_TEMP/claudeled-strict"
 
+      # Not on the runner image, so it has to be installed. Unpinned, which means a
+      # SwiftLint release can turn a branch red without that branch changing -- the
+      # price of not hand-maintaining a version here.
+      - name: Install SwiftLint
+        run: brew install swiftlint
+
       - name: Lint
-        run: swiftlint lint --strict
+        run: swiftlint lint --strict --reporter github-actions-logging
 
       # The completion is shipped and installed, but never compiled by anything else,
       # so a syntax error in it would otherwise reach users.
