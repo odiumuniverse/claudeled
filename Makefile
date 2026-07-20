@@ -7,7 +7,7 @@
 #   make release    zip the bundle for a GitHub release
 #   make clean      throw away build output
 
-VERSION ?= 0.9.0-beta
+VERSION ?= 1.0.0-alpha
 APP      = build/claudeled.app
 BUNDLE   = com.odiumuniverse.claudeled
 
