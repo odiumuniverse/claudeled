@@ -1,0 +1,382 @@
+// tests.swift -- assert-based checks over Core.swift. No framework, no fixtures.
+//   swiftc -O Core.swift tests.swift -o build/tests && ./build/tests
+
+import Foundation
+
+var failures = 0
+var checks = 0
+
+func check(_ condition: Bool, _ what: String,
+           file: StaticString = #file, line: UInt = #line) {
+    checks += 1
+    if condition {
+        print("  ok   \(what)")
+    } else {
+        failures += 1
+        print("  FAIL \(what)   (\(file):\(line))")
+    }
+}
+
+func equal<T: Equatable>(_ got: T, _ want: T, _ what: String,
+                         file: StaticString = #file, line: UInt = #line) {
+    checks += 1
+    if got == want {
+        print("  ok   \(what)")
+    } else {
+        failures += 1
+        print("  FAIL \(what)")
+        print("       got:  \(got)")
+        print("       want: \(want)   (\(file):\(line))")
+    }
+}
+
+func section(_ name: String) { print("\n\(name)") }
+
+// Work in a scratch directory: never touch the user's real config.
+let scratch = URL(fileURLWithPath: NSTemporaryDirectory())
+    .appendingPathComponent("claudeled-tests-\(getpid())")
+configRoot = scratch
+ensureDirs()
+defer { try? FileManager.default.removeItem(at: scratch) }
+
+// MARK: - keyboard selection
+//
+// "Empty means all" is the tricky part: the menu shows ticks, the config stores a list,
+// and the two disagree about what "everything" looks like.
+
+section("selection")
+
+let both = ["Internal", "Magic"]
+
+equal(Selection.toggle("Magic", current: [], drivable: both), ["Internal"],
+      "unticking one of two, starting from 'all', leaves the other")
+
+equal(Selection.toggle("Magic", current: ["Internal"], drivable: both), [],
+      "ticking the second collapses back to 'all'")
+
+equal(Selection.toggle("Internal", current: ["Internal"], drivable: both), ["Internal"],
+      "unticking the last selected keyboard is refused, the light must stay drivable")
+
+equal(Selection.toggle("Internal", current: [], drivable: ["Internal"]), [],
+      "with a single keyboard attached, unticking it is refused")
+
+equal(Selection.toggle("MX Keys", current: [], drivable: both), [],
+      "toggling a keyboard that is not attached changes nothing")
+
+equal(Selection.toggle("Magic", current: ["Internal", "Unplugged"], drivable: both), [],
+      "a stale name in the config is dropped, and the result collapses to 'all'")
+
+// MARK: - config round trip
+
+section("config")
+
+var cfg = Config(keyboards: ["Magic"])
+cfg.save()
+equal(Config.load(), cfg, "config survives a save/load round trip")
+
+check(Config(keyboards: []).selects("anything"), "empty selection means every keyboard")
+check(Config(keyboards: ["Magic"]).selects("Magic"), "a named keyboard is selected")
+check(!Config(keyboards: ["Magic"]).selects("Internal"), "an unnamed keyboard is not")
+
+// A config written before idleCapSeconds existed must still load, or upgrading would
+// silently reset the user's keyboard selection.
+try? #"{"keyboards":["Magic"]}"#.write(to: configFile, atomically: true, encoding: .utf8)
+equal(Config.load().keyboards, ["Magic"], "a config predating a new field still loads")
+equal(Config.load().idleCap, 300, "and the new field falls back to its default")
+check(Config.load().blinkTimeout == .forever,
+      "a config without a blink timeout blinks until answered, as it always did")
+
+// MARK: - blink timeout parsing
+
+section("blink timeout")
+
+check(BlinkTimeout.parse("5m") == .after(300), "minutes are read as minutes")
+check(BlinkTimeout.parse("90s") == .after(90), "seconds are read as seconds")
+check(BlinkTimeout.parse("1h") == .after(3600), "hours are read as hours")
+check(BlinkTimeout.parse("600") == .after(600), "a bare number is seconds, as stored")
+check(BlinkTimeout.parse(" 10M ") == .after(600), "case and surrounding space do not matter")
+check(BlinkTimeout.parse("always") == .forever, "'always' is the no-timeout spelling")
+check(BlinkTimeout.parse("0") == .forever, "zero means forever, not a zero-length blink")
+check(BlinkTimeout.parse("-5m") == nil, "a negative duration is refused")
+check(BlinkTimeout.parse("soon") == nil, "nonsense is refused rather than defaulted")
+check(BlinkTimeout.parse("") == nil, "an empty string is refused")
+
+equal(BlinkTimeout.after(300).label, "5 min", "a round number of minutes reads as minutes")
+equal(BlinkTimeout.after(90).label, "90s", "an odd duration keeps its seconds")
+equal(BlinkTimeout.forever.label, "Always", "forever has a name the menu can show")
+
+// The menu writes seconds back into the config, so the presets must survive the trip.
+for preset in BlinkTimeout.presets {
+    var stored = Config()
+    stored.blinkTimeoutSeconds = preset.seconds
+    check(stored.blinkTimeout == preset, "the '\(preset.label)' preset round trips through config")
+}
+
+try? FileManager.default.removeItem(at: configFile)
+equal(Config.load(), Config(), "a missing config file loads defaults rather than failing")
+
+// MARK: - blink decision
+
+section("blink decision")
+
+let now = Date()
+func session(_ id: String, _ event: SessionEvent, pid: pid_t = 0, at: Date = Date()) -> Session {
+    Session(id: id, pid: pid, event: event, at: at)
+}
+
+check(!shouldBlink(sessions: []), "no sessions, no blinking")
+check(shouldBlink(sessions: [session("a", .stop)]), "a finished turn blinks")
+check(shouldBlink(sessions: [session("a", .notify)]), "a permission prompt blinks")
+check(!shouldBlink(sessions: [session("a", .prompt)]), "work in flight does not blink")
+check(shouldBlink(sessions: [session("a", .prompt), session("b", .stop)]),
+      "OR across windows: one waiting session is enough")
+check(!shouldBlink(sessions: [session("a", .prompt), session("b", .prompt)]),
+      "several busy sessions still do not blink")
+
+// With a timeout, the lamp gives up on a session that has been waiting too long. The
+// session is not touched: staleness is a separate question, tested below.
+let waitingFor: (TimeInterval) -> [Session] = { [session("a", .stop, at: now.addingTimeInterval(-$0))] }
+
+check(shouldBlink(sessions: waitingFor(3600), timeout: .forever, now: now),
+      "without a timeout, an hour of waiting still blinks")
+check(shouldBlink(sessions: waitingFor(60), timeout: .after(300), now: now),
+      "inside the timeout, a waiting session blinks")
+check(!shouldBlink(sessions: waitingFor(301), timeout: .after(300), now: now),
+      "past the timeout, the lamp goes dark")
+check(!shouldBlink(sessions: waitingFor(300), timeout: .after(300), now: now),
+      "the timeout is exclusive: exactly at the limit is already dark")
+check(shouldBlink(sessions: [session("a", .stop, at: now.addingTimeInterval(-3600)),
+                             session("b", .stop, at: now.addingTimeInterval(-10))],
+                  timeout: .after(300), now: now),
+      "OR still holds under a timeout: one fresh session keeps the lamp lit")
+
+// MARK: - staleness
+//
+// The requirement is that a kill -9'd terminal cannot leave the lamp blinking.
+
+section("staleness")
+
+let dead: (pid_t) -> Bool = { _ in false }
+let living: (pid_t) -> Bool = { _ in true }
+
+check(isStale(session("a", .stop, pid: 4242), alive: dead),
+      "a session whose process is gone is stale")
+check(!isStale(session("a", .stop, pid: 4242), alive: living),
+      "a session whose process lives is kept")
+check(!isStale(session("a", .stop, pid: 0), alive: dead),
+      "pid 0 means unknown, so the pid check must not fire")
+check(isStale(session("a", .stop, pid: 0, at: now.addingTimeInterval(-staleTTL - 1)),
+              now: now, alive: dead),
+      "an unidentified session older than the TTL is stale")
+check(!isStale(session("a", .stop, pid: 0, at: now.addingTimeInterval(-60)),
+               now: now, alive: dead),
+      "a recent unidentified session is kept")
+
+// MARK: - session files
+
+section("session files")
+
+record(session: "s1", event: .stop, pid: 1234)
+record(session: "s2", event: .prompt, pid: 0)
+equal(readSessions().count, 2, "both session files are read back")
+check(readSessions().contains { $0.id == "s1" && $0.event == .stop }, "event survives the round trip")
+
+record(session: "s1", event: .prompt, pid: 1234)
+check(readSessions().contains { $0.id == "s1" && $0.event == .prompt },
+      "recording again overwrites the event rather than adding a session")
+
+forget("s1")
+equal(readSessions().count, 1, "forgetting removes exactly one session")
+
+try? "garbage".write(to: sessionsDir.appendingPathComponent("broken"),
+                     atomically: true, encoding: .utf8)
+equal(readSessions().count, 1, "an unparseable file is ignored, not crashed on")
+try? FileManager.default.removeItem(at: sessionsDir.appendingPathComponent("broken"))
+
+equal(safeSessionID("../../etc/passwd"), "_/_/etc/passwd".replacingOccurrences(of: "/", with: "_"),
+      "a session id cannot escape its directory")
+
+// MARK: - event log
+
+section("event log")
+
+let day: TimeInterval = 24 * 3600
+let noon = Date(timeIntervalSince1970: 1_752_926_400)   // 2025-07-19 12:00 UTC
+
+logEvent(session: "s1", event: .prompt, project: "claudeled", at: noon)
+logEvent(session: "s1", event: .stop, project: "claudeled", at: noon + 30)
+logEvent(session: "s2", event: .notify, project: "topscan", at: noon + 60)
+
+let logged = readEvents(from: noon - day, to: noon + day)
+equal(logged.count, 3, "every appended event is read back")
+equal(logged.map(\.e), [.prompt, .stop, .notify], "events come back in time order")
+equal(logged.first?.p, "claudeled", "the project survives the round trip")
+
+equal(readEvents(from: noon + 40, to: noon + day).count, 1,
+      "the window excludes events outside it")
+equal(readEvents(from: noon + 10 * 365 * day).count, 0,
+      "a window with no data reads as empty, not as everything")
+
+let logFile = eventsDir.appendingPathComponent(monthFile(for: noon))
+if let handle = try? FileHandle(forWritingTo: logFile) {
+    handle.seekToEndOfFile()
+    handle.write(Data("{\"t\":1,\"s\":\"tor\n".utf8))
+    try? handle.close()
+}
+equal(readEvents(from: noon - day, to: noon + day).count, 3,
+      "a torn line is skipped rather than costing the whole report")
+
+equal(monthFile(for: noon), "2025-07.jsonl", "log files are named by month")
+equal(monthsSpanned(from: noon, to: noon + 30 * day), ["2025-07.jsonl", "2025-08.jsonl"],
+      "a window spanning a month boundary reads both files")
+
+equal(projectName(cwd: "/Users/someone/work/acme-secret"), "acme-secret",
+      "only the last path component is kept, never the full path")
+equal(projectName(cwd: nil), "unknown", "a hook without a cwd still logs")
+equal(projectName(cwd: "/"), "unknown", "the root directory has no useful name")
+
+// MARK: - statistics
+
+section("statistics")
+
+func event(_ session: String, _ kind: SessionEvent, _ offset: TimeInterval,
+           project: String = "claudeled") -> LoggedEvent {
+    LoggedEvent(t: noon.timeIntervalSince1970 + offset, s: session, e: kind, p: project)
+}
+
+let cap: TimeInterval = 300
+
+let oneTurn = summarise([event("a", .prompt, 0), event("a", .stop, 60),
+                         event("a", .prompt, 90)], cap: cap)
+equal(oneTurn.totals.worked, 60, "prompt to stop is Claude working")
+equal(oneTurn.totals.waiting, 30, "stop to prompt is Claude waiting for you")
+equal(oneTurn.sessions, 1, "one session id is one session")
+
+equal(summarise([event("a", .notify, 0), event("a", .prompt, 45)], cap: cap).totals.blocked, 45,
+      "notify to the next event is time blocked on a permission prompt")
+
+let lunch = summarise([event("a", .stop, 0), event("a", .prompt, 3600)], cap: cap)
+equal(lunch.totals.waiting, 0, "a gap over the cap is not counted as waiting")
+equal(lunch.totals.away, 3600, "it is reported as away instead of vanishing")
+
+let crashed = summarise([event("a", .prompt, 0), event("a", .stop, 7200)], cap: cap)
+equal(crashed.totals.worked, 0,
+      "the cap applies to Claude's time too: a killed session cannot gift you two hours")
+
+let interleaved = summarise([event("a", .prompt, 0), event("b", .prompt, 10),
+                             event("a", .stop, 60), event("b", .stop, 100)], cap: cap)
+equal(interleaved.totals.worked, 150, "sessions are paired separately, not by arrival order")
+equal(interleaved.sessions, 2, "both sessions are counted")
+
+let mixed = summarise([event("a", .prompt, 0, project: "topscan"),
+                       event("a", .stop, 120, project: "topscan"),
+                       event("b", .prompt, 0), event("b", .stop, 30)], cap: cap)
+equal(mixed.projects.map(\.name), ["topscan", "claudeled"],
+      "projects are listed busiest first")
+equal(mixed.projects.first?.totals.worked, 120, "time lands on the right project")
+
+equal(summarise([event("a", .stop, 0)], cap: cap).totals, Totals(),
+      "a single event brackets no gap and contributes nothing")
+
+equal(formatDuration(45), "45s", "under a minute is shown in seconds")
+equal(formatDuration(90), "1m", "minutes are truncated, not rounded up to an hour")
+equal(formatDuration(3600 + 12 * 60), "1h 12m", "hours and minutes")
+equal(formatDuration(3600 + 5 * 60), "1h 05m", "minutes are padded, so columns line up")
+
+// MARK: - periods and formats
+
+section("periods and formats")
+
+check(Period.all.start(now: noon) == nil, "'all time' has no lower bound, so every log is read")
+equal(Period.week.start(now: noon), noon.addingTimeInterval(-7 * day),
+      "a week is a rolling window, not a calendar one")
+equal(Period.allCases.map(\.rawValue), ["week", "month", "year", "all"],
+      "the periods the picker offers are the periods the flags accept")
+
+let sample = summarise([event("a", .prompt, 0, project: "topscan"),
+                        event("a", .stop, 120, project: "topscan"),
+                        event("a", .prompt, 180, project: "topscan")], cap: cap)
+
+let markdown = renderMarkdown(sample, label: "last 7 days", cap: cap)
+check(markdown.contains("| Claude worked | 2m |"), "markdown carries the headline totals")
+check(markdown.contains("| topscan | 2m | 1m |"), "markdown carries the per-project rows")
+
+let json = renderJSON(sample, period: .week, now: noon, cap: cap)
+check(json.contains("\"worked\" : 120"), "JSON reports whole seconds")
+check(json.contains("\"idleCapSeconds\" : 300"), "JSON says which cap produced the numbers")
+check(json.contains("\"name\" : \"topscan\""), "JSON carries the project breakdown")
+
+let table = renderText([Summary(label: "last 7 days", report: sample)],
+                       projects: sample, cap: cap)
+check(table.contains("waiting on you 1m"), "the table carries the headline totals")
+check(table.contains("1 session"), "a single session is not pluralised")
+
+// MARK: - hook merging
+//
+// This one writes to the user's settings.json in production, so it gets the most care.
+
+section("hook merging")
+
+let foreign: [String: Any] = [
+    "model": "opus",
+    "hooks": [
+        "Stop": [["hooks": [["type": "command", "command": "someone-elses-hook.sh"]]]],
+        "PreToolUse": [["hooks": [["type": "command", "command": "another.sh"]]]],
+    ],
+]
+
+let installed = HookPlan.install(into: foreign, executable: "/Applications/claudeled.app/x")
+
+check(installed["model"] as? String == "opus", "unrelated top-level keys are preserved")
+
+func commands(_ settings: [String: Any], _ event: String) -> [String] {
+    let hooks = settings["hooks"] as? [String: Any] ?? [:]
+    let groups = hooks[event] as? [[String: Any]] ?? []
+    return groups.flatMap { ($0["hooks"] as? [[String: Any]] ?? []).compactMap { $0["command"] as? String } }
+}
+
+check(commands(installed, "Stop").contains("someone-elses-hook.sh"),
+      "a foreign hook on an event we also use is preserved")
+check(commands(installed, "Stop").contains { $0.contains("claudeled") },
+      "our hook is added alongside it")
+check(commands(installed, "PreToolUse") == ["another.sh"],
+      "an event we do not use is left completely alone")
+check(HookPlan.installed(in: installed, executable: "/Applications/claudeled.app/x"),
+      "install is detected afterwards")
+
+let twice = HookPlan.install(into: installed, executable: "/Applications/claudeled.app/x")
+equal(commands(twice, "Stop").filter { $0.contains("claudeled") }.count, 1,
+      "installing twice does not duplicate our hook")
+
+let moved = HookPlan.install(into: installed, executable: "/new/path/claudeled")
+equal(commands(moved, "Stop").filter { $0.contains("claudeled") }.count, 1,
+      "a moved bundle replaces the old entry instead of adding a second")
+check(commands(moved, "Stop").contains { $0.contains("/new/path/claudeled") },
+      "the replacement points at the new location")
+check(commands(moved, "Stop").contains("someone-elses-hook.sh"),
+      "moving still preserves foreign hooks")
+
+let removed = HookPlan.remove(from: installed)
+check(!commands(removed, "Stop").contains { $0.contains("claudeled") },
+      "remove takes our hook out")
+check(commands(removed, "Stop").contains("someone-elses-hook.sh"),
+      "remove leaves foreign hooks in place")
+check(!HookPlan.installed(in: removed, executable: "/Applications/claudeled.app/x"),
+      "removal is detected")
+check((removed["hooks"] as? [String: Any])?["Notification"] == nil,
+      "an event that held only our hook is dropped entirely")
+
+let virgin = HookPlan.remove(from: ["model": "opus"])
+check(virgin["hooks"] == nil, "removing from settings without hooks does not invent a hooks key")
+
+check(!HookPlan.events.contains { $0.claudeEvent == "SubagentStop" },
+      "SubagentStop stays unhooked, or subagents would blink for the main agent")
+
+// MARK: -
+
+print("\n\(checks - failures)/\(checks) checks passed")
+if failures > 0 {
+    print("\(failures) FAILED")
+    exit(1)
+}
+print("PASS")
