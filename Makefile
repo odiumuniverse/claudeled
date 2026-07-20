@@ -10,7 +10,12 @@
 VERSION ?= 0.9.0-beta
 APP      = build/claudeled.app
 BUNDLE   = com.odiumuniverse.claudeled
-SOURCES  = Core.swift main.swift
+
+# Core/ is free of AppKit and IOKit, so the tests can compile against it directly.
+# App/ is the shell around it. A new file in either is picked up without editing this.
+CORE     = $(wildcard Sources/claudeled/Core/*.swift)
+APPSRC   = $(wildcard Sources/claudeled/App/*.swift)
+SOURCES  = $(CORE) $(APPSRC)
 
 # Apple silicon Homebrew is already on PATH and fpath; Intel and plain installs are not.
 PREFIX  ?= $(shell [ -d /opt/homebrew ] && echo /opt/homebrew || echo /usr/local)
@@ -50,9 +55,9 @@ $(APP): $(SOURCES) Resources/claudeled.icns Makefile
 	@echo "built $(APP)"
 
 # Drawn from code rather than committed as a blob, so it stays reviewable in a diff.
-Resources/claudeled.icns: make-icon.swift
+Resources/claudeled.icns: Tools/make-icon.swift
 	@mkdir -p build Resources
-	swiftc -O make-icon.swift -o build/make-icon
+	swiftc -O Tools/make-icon.swift -o build/make-icon
 	@./build/make-icon Resources/claudeled.iconset
 	@iconutil -c icns Resources/claudeled.iconset -o $@
 
@@ -60,9 +65,9 @@ Resources/claudeled.icns: make-icon.swift
 test: build/tests
 	@./build/tests
 
-build/tests: Core.swift tests/main.swift
+build/tests: $(CORE) Tests/main.swift
 	@mkdir -p build
-	swiftc -O Core.swift tests/main.swift -o $@
+	swiftc -O $(CORE) Tests/main.swift -o $@
 
 ## build, install into /Applications and PATH, relaunch
 install: build
