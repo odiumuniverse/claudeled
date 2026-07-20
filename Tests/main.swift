@@ -83,6 +83,34 @@ check(!Config(keyboards: ["Magic"]).selects("Internal"), "an unnamed keyboard is
 try? #"{"keyboards":["Magic"]}"#.write(to: configFile, atomically: true, encoding: .utf8)
 equal(Config.load().keyboards, ["Magic"], "a config predating a new field still loads")
 equal(Config.load().idleCap, 300, "and the new field falls back to its default")
+check(Config.load().blinkTimeout == .forever,
+      "a config without a blink timeout blinks until answered, as it always did")
+
+// MARK: - blink timeout parsing
+
+section("blink timeout")
+
+check(BlinkTimeout.parse("5m") == .after(300), "minutes are read as minutes")
+check(BlinkTimeout.parse("90s") == .after(90), "seconds are read as seconds")
+check(BlinkTimeout.parse("1h") == .after(3600), "hours are read as hours")
+check(BlinkTimeout.parse("600") == .after(600), "a bare number is seconds, as stored")
+check(BlinkTimeout.parse(" 10M ") == .after(600), "case and surrounding space do not matter")
+check(BlinkTimeout.parse("always") == .forever, "'always' is the no-timeout spelling")
+check(BlinkTimeout.parse("0") == .forever, "zero means forever, not a zero-length blink")
+check(BlinkTimeout.parse("-5m") == nil, "a negative duration is refused")
+check(BlinkTimeout.parse("soon") == nil, "nonsense is refused rather than defaulted")
+check(BlinkTimeout.parse("") == nil, "an empty string is refused")
+
+equal(BlinkTimeout.after(300).label, "5 min", "a round number of minutes reads as minutes")
+equal(BlinkTimeout.after(90).label, "90s", "an odd duration keeps its seconds")
+equal(BlinkTimeout.forever.label, "Always", "forever has a name the menu can show")
+
+// The menu writes seconds back into the config, so the presets must survive the trip.
+for preset in BlinkTimeout.presets {
+    var stored = Config()
+    stored.blinkTimeoutSeconds = preset.seconds
+    check(stored.blinkTimeout == preset, "the '\(preset.label)' preset round trips through config")
+}
 
 try? FileManager.default.removeItem(at: configFile)
 equal(Config.load(), Config(), "a missing config file loads defaults rather than failing")
@@ -104,6 +132,23 @@ check(shouldBlink(sessions: [session("a", .prompt), session("b", .stop)]),
       "OR across windows: one waiting session is enough")
 check(!shouldBlink(sessions: [session("a", .prompt), session("b", .prompt)]),
       "several busy sessions still do not blink")
+
+// With a timeout, the lamp gives up on a session that has been waiting too long. The
+// session is not touched: staleness is a separate question, tested below.
+let waitingFor: (TimeInterval) -> [Session] = { [session("a", .stop, at: now.addingTimeInterval(-$0))] }
+
+check(shouldBlink(sessions: waitingFor(3600), timeout: .forever, now: now),
+      "without a timeout, an hour of waiting still blinks")
+check(shouldBlink(sessions: waitingFor(60), timeout: .after(300), now: now),
+      "inside the timeout, a waiting session blinks")
+check(!shouldBlink(sessions: waitingFor(301), timeout: .after(300), now: now),
+      "past the timeout, the lamp goes dark")
+check(!shouldBlink(sessions: waitingFor(300), timeout: .after(300), now: now),
+      "the timeout is exclusive: exactly at the limit is already dark")
+check(shouldBlink(sessions: [session("a", .stop, at: now.addingTimeInterval(-3600)),
+                             session("b", .stop, at: now.addingTimeInterval(-10))],
+                  timeout: .after(300), now: now),
+      "OR still holds under a timeout: one fresh session keeps the lamp lit")
 
 // MARK: - staleness
 //

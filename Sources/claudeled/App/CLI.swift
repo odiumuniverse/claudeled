@@ -71,6 +71,34 @@ func cliStatus() {
     }
 }
 
+/// `claudeled blink` reports, `claudeled blink <value>` sets. The running app picks the
+/// change up within a second; nothing needs restarting.
+func cliBlink(_ argument: String?) {
+    var config = Config.load()
+
+    guard let argument, !argument.isEmpty else {
+        switch config.blinkTimeout {
+        case .forever:
+            print("blinking until answered")
+        case .after(let seconds):
+            print("blinking for \(config.blinkTimeout.label) (\(Int(seconds))s), "
+                  + "then dark until the next event")
+        }
+        return
+    }
+
+    guard let timeout = BlinkTimeout.parse(argument) else {
+        print("cannot read '\(argument)' as a duration; try 5m, 30m, 90s, 1h or always")
+        exit(2)
+    }
+
+    config.blinkTimeoutSeconds = timeout.seconds
+    config.save()
+    print(timeout == .forever
+          ? "blinking until answered"
+          : "blinking for \(timeout.label) after a session starts waiting")
+}
+
 // MARK: - stats
 
 /// Where a card goes when the picker writes one, and when `--card` is given no path.
@@ -196,6 +224,8 @@ claudeled -- Caps Lock LED indicator for Claude Code
   claudeled devices --names    names only, for shell completion
   claudeled test <keyboard>    light a keyboard for 3s
   claudeled status             show tracked sessions
+  claudeled blink              show how long the lamp blinks for
+  claudeled blink <duration>   5m | 30m | 90s | 1h | always
   claudeled stats              time spent, today and over the last 7 days
   claudeled stats <period>     week | month | year | all
   claudeled stats -i           pick a period and a destination with the arrow keys

@@ -16,6 +16,7 @@ _claudeled() {
     'devices:list keyboards and which are selected'
     'test:light a keyboard for 3s'
     'status:show tracked sessions and the current mode'
+    'blink:show or set how long the lamp blinks for'
     'stats:time spent, today and over the last 7 days'
     'hooks:print the Claude Code hook config to install'
   )
@@ -35,6 +36,16 @@ _claudeled() {
           ;;
         devices)
           _arguments '--names[print names only, for scripts]'
+          ;;
+        blink)
+          local -a durations
+          durations=(
+            '5m:blink for five minutes, then go dark'
+            '10m:blink for ten minutes, then go dark'
+            '30m:blink for half an hour, then go dark'
+            'always:blink until the session is answered'
+          )
+          _describe -t durations duration durations
           ;;
         stats)
           local -a periods

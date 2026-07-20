@@ -149,6 +149,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
 
+        // A submenu rather than four more rows: the keyboard list is already the long
+        // part of this menu, and the timeout is set once and then forgotten.
+        let blinkFor = NSMenuItem(title: "Blink for", action: nil, keyEquivalent: "")
+        let choices = NSMenu()
+        for preset in BlinkTimeout.presets {
+            let item = NSMenuItem(title: preset.label, action: #selector(setBlinkTimeout(_:)),
+                                  keyEquivalent: "")
+            item.target = self
+            item.representedObject = preset.seconds     // nil means forever
+            item.state = preset == config.blinkTimeout ? .on : .off
+            choices.addItem(item)
+        }
+        // A hand-edited config can hold a value no preset offers. Show it rather than
+        // leaving the submenu with nothing ticked.
+        if !BlinkTimeout.presets.contains(config.blinkTimeout) {
+            let custom = NSMenuItem(title: config.blinkTimeout.label, action: nil,
+                                    keyEquivalent: "")
+            custom.state = .on
+            choices.addItem(custom)
+        }
+        blinkFor.submenu = choices
+        menu.addItem(blinkFor)
+        menu.addItem(.separator())
+
         let stats = NSMenuItem(title: "Statistics…", action: #selector(openStats),
                                keyEquivalent: "")
         stats.target = self
@@ -205,6 +229,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         config.save()
         registry.reopen()
         reopenMenu()
+    }
+
+    /// No reopenMenu here, unlike the keyboard ticks: this is a one-of-four choice, so
+    /// there is nothing to pick next.
+    @objc private func setBlinkTimeout(_ sender: NSMenuItem) {
+        var config = Config.load()
+        config.blinkTimeoutSeconds = sender.representedObject as? TimeInterval
+        config.save()
     }
 
     @objc private func toggleHooks(_ sender: NSMenuItem) {

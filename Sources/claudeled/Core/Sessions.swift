@@ -78,6 +78,16 @@ func safeSessionID(_ raw: String) -> String {
 }
 
 /// Aggregation across windows is OR: any session needing you lights the lamp.
-func shouldBlink(sessions: [Session]) -> Bool {
-    sessions.contains { blinkingEvents.contains($0.event) }
+///
+/// With a timeout, a session stops counting once it has been waiting longer than it.
+/// The session itself is left alone -- it is still waiting, and `status` and the menu
+/// still say so; only the light gives up. The next hook event rewrites `at`, so
+/// answering one window and leaving another re-arms the timer for the one you touched.
+func shouldBlink(sessions: [Session], timeout: BlinkTimeout = .forever,
+                 now: Date = Date()) -> Bool {
+    sessions.contains { session in
+        guard blinkingEvents.contains(session.event) else { return false }
+        guard let limit = timeout.seconds else { return true }
+        return now.timeIntervalSince(session.at) < limit
+    }
 }

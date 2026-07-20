@@ -1,7 +1,7 @@
 # claudeled -- Caps Lock LED indicator for Claude Code.
 #
 #   make            build the app bundle
-#   make test       run the checks over Core.swift
+#   make test       run the checks over Core/
 #   make install    build, install into /Applications and PATH, relaunch
 #   make uninstall  remove everything but your config
 #   make release    zip the bundle for a GitHub release
@@ -110,6 +110,7 @@ release: build
 run: build
 	@open $(APP)
 
+## throw away build output
 clean:
 	rm -rf build
 

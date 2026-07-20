@@ -1,8 +1,10 @@
 # claudeled
 
 Blinks the Caps Lock LED on your keyboards while a Claude Code session is waiting
-for you. Handles several sessions in several windows at once, and lets you pick
-which keyboards light up.
+for you. Handles several sessions in several windows at once, lets you pick which
+keyboards light up and how long they keep blinking, and — since the same hooks
+already know when Claude was working and when it was waiting — reports how your time
+actually went.
 
 It drives the keyboard's LED element directly. The Caps Lock **modifier** is never
 touched, so your typing case is unaffected — verified by sampling both
@@ -13,6 +15,8 @@ LEDs were lit: neither was ever asserted.
 > endorsed by, or sponsored by Anthropic or Claude.
 
 ## Install
+
+Needs macOS 13 or newer, and Claude Code.
 
 ### From source (recommended)
 
@@ -59,18 +63,25 @@ itself.
 ```sh
 make            # build into build/
 make test       # run the checks
+make run        # launch the built copy without installing it
 make install    # build, install, relaunch
 make uninstall  # remove the app, the CLI and the completion
 make release    # zip the bundle for a GitHub release
+make clean      # throw away build output
 make help       # list the targets
 ```
 
-## Tests
+## Layout and tests
 
-`Core.swift` holds everything that can be decided without a keyboard or a screen —
-selection, staleness, the blink decision, the `settings.json` merge — so it can be
-tested directly. `make test` runs assert-based checks over it: no framework, no
-fixtures, one binary that exits non-zero when something breaks.
+`Sources/claudeled/Core/` holds everything that can be decided without a keyboard or a
+screen — keyboard selection, the blink decision and its timeout, staleness, the event
+log, the statistics, the `settings.json` merge. It imports neither AppKit nor IOKit.
+`Sources/claudeled/App/` is the shell around it: the menu bar, the HID writes, the CLI.
+
+`make test` compiles `Core/` together with `Tests/main.swift` and runs it. Assert-based
+checks, no framework and no fixtures — one binary that prints what it verified and
+exits non-zero when something breaks. Because only `Core/` is compiled in, logic that
+needs a test has to live there.
 
 ## Menu
 
@@ -78,9 +89,16 @@ fixtures, one binary that exits non-zero when something breaks.
 |---|---|
 | *N sessions waiting* | how many sessions are waiting on you right now |
 | Keyboard list | tick any combination; keyboards without a caps LED are listed but not selectable |
+| Blink for | 5 min, 10 min, 30 min, or Always — how long the lamp keeps blinking |
+| Statistics… | opens the stats window; see [Statistics](#statistics) |
 | Claude Code hooks installed | tick to install, untick to remove |
 | Start at login | registers a login item via `SMAppService` |
 | Hide icon | takes the icon out of the menu bar, keeps blinking |
+| Visit GitHub | opens this page |
+
+Without Input Monitoring the menu shows none of that. It leads with the missing
+permission and a button to the settings pane instead, because every keyboard would
+otherwise appear to have no caps LED — see [Permissions](#permissions).
 
 Hiding is not quitting. To bring the icon back, launch claudeled again — a second
 launch reopens the running copy rather than starting another — or run `claudeled show`.
@@ -88,26 +106,45 @@ launch reopens the running copy rather than starting another — or run `claudel
 The lamp has exactly one meaning: Claude is waiting for you. It stays dark while
 Claude works, which is most of the time.
 
+*Blink for* puts a limit on that. The default is *Always*, which is what claudeled has
+always done: blink until you answer. Pick a duration instead and the lamp gives up
+after it, on the theory that a light you have ignored for half an hour has stopped
+being information. The session is not forgotten — the menu and `claudeled status` still
+count it as waiting, and the next thing Claude does re-arms the timer.
+
 Unticking the last selected keyboard is refused. "Nothing selected" and "everything
 selected" are the same stored value, so allowing it would leave you looking at a menu
 full of ticks and a lamp that never lights.
 
 ## CLI
 
-The app bundle is also the CLI, and the cask puts it on your `PATH`.
+The app bundle is also the CLI: one binary, which runs the menu bar app when given no
+arguments and answers as a command line tool when given some. `make install` symlinks
+it onto your `PATH`.
 
 ```
+claudeled                    run the menu bar app
 claudeled devices            list keyboards and which ones blink
 claudeled devices --names    names only, for scripts
 claudeled test <keyboard>    light a keyboard for 3s
 claudeled status             show tracked sessions
+claudeled blink              show how long the lamp blinks for
+claudeled blink <duration>   set it: 5m, 30m, 90s, 1h, or always
 claudeled stats              time spent, today and over the last 7 days
 claudeled show               bring the icon back after hiding it
 claudeled hooks              print the hook config, if you prefer to install it yourself
+claudeled help               the same list
 ```
+
+`claudeled hook <event>` also exists and is not for you: it is what the installed hooks
+call.
 
 Zsh completion for `claudeled test` lists your keyboards. The names are read from the
 running binary, so a keyboard you just plugged in is completable straight away.
+
+`claudeled blink` and the *Blink for* menu write the same setting, and the running app
+notices within a second either way — nothing needs restarting. The menu offers four
+presets; the CLI takes any duration.
 
 ## How it works
 
@@ -129,6 +166,18 @@ A session killed with `kill -9`, or a terminal window closed without warning, le
 its file behind. The app records the owning process id and drops any session whose
 process is gone, within a second. A 12 hour TTL is the backstop for the rare case
 where the process could not be identified.
+
+Everything claudeled keeps lives under `~/.config/claudeled/`:
+
+| Path | What |
+|---|---|
+| `config.json` | keyboard selection, blink timeout, idle cap |
+| `sessions/` | one file per live session: pid, timestamp, last event |
+| `events/YYYY-MM.jsonl` | the append-only event log the statistics read |
+| `diagnostics.log` | what the app saw at launch — keyboards, permission state |
+
+`diagnostics.log` is the first thing to read when the lamp does not light: it records
+whether Input Monitoring was granted and which keyboards exposed a caps LED.
 
 ## Statistics
 
@@ -158,8 +207,8 @@ claudeled stats week --json           the same numbers, for scripts
 claudeled stats all --card [file]     a PNG card, for sharing
 ```
 
-The menu has the same thing under *Statistics…*, with buttons for copying the
-markdown and saving the card.
+The menu has the same thing under *Statistics…*: a segmented control to switch period,
+and buttons for *Copy as Markdown* and *Save PNG Card…*.
 
 The picker only appears when both ends are a terminal, so `claudeled stats --json |
 jq` is never interrupted by a menu.
