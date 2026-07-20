@@ -95,6 +95,7 @@ claudeled -- Caps Lock LED indicator for Claude Code
   claudeled devices --names    names only, for shell completion
   claudeled test <keyboard>    light a keyboard for 3s
   claudeled status             show tracked sessions
+  claudeled stats              time spent, today and this week
   claudeled show               bring the menu bar icon back after hiding it
   claudeled hooks              print the hook config, to install it by hand
   claudeled hook <event>       internal: called by the hooks themselves

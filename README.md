@@ -9,6 +9,9 @@ touched, so your typing case is unaffected — verified by sampling both
 `IOHIDGetModifierLockState` and the event system's `.maskAlphaShift` flag while the
 LEDs were lit: neither was ever asserted.
 
+> This is an unofficial, community-developed project. It is not affiliated with,
+> endorsed by, or sponsored by Anthropic or Claude.
+
 ## Install
 
 ### From source (recommended)
@@ -98,6 +101,7 @@ claudeled devices            list keyboards and which ones blink
 claudeled devices --names    names only, for scripts
 claudeled test <keyboard>    light a keyboard for 3s
 claudeled status             show tracked sessions
+claudeled stats              time spent, today and this week
 claudeled show               bring the icon back after hiding it
 claudeled hooks              print the hook config, if you prefer to install it yourself
 ```
@@ -125,6 +129,34 @@ A session killed with `kill -9`, or a terminal window closed without warning, le
 its file behind. The app records the owning process id and drops any session whose
 process is gone, within a second. A 12 hour TTL is the backstop for the rare case
 where the process could not be identified.
+
+## Statistics
+
+The same hooks append one line each to `~/.config/claudeled/events/YYYY-MM.jsonl`, one
+file per month. `claudeled stats` reads them back:
+
+```
+today      worked 1h 12m · waiting on you 34m · blocked 2m
+this week  worked 8h 03m · waiting on you 3h 41m
+
+project      worked   waiting
+topscan       5h 20m    2h 10m
+claudeled     2h 43m    1h 31m
+
+12 sessions this week · 4h 12m skipped as away (gaps over 5m)
+```
+
+Every pair of consecutive events brackets a gap, and the earlier event says what was
+happening during it: after `prompt` Claude is working, after `stop` it is waiting for
+you, after `notify` it is blocked on a permission prompt.
+
+A gap longer than five minutes is not counted at all — you went to lunch, or shut the
+lid, and no honest number can tell that apart from thinking hard. It is reported on
+the last line rather than dropped silently. Change the threshold with
+`"idleCapSeconds"` in `~/.config/claudeled/config.json`.
+
+Only the last component of the working directory is stored, never the full path, so
+sharing a report does not leak where your work lives.
 
 ## Permissions
 

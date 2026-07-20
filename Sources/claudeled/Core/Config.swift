@@ -7,6 +7,15 @@ struct Config: Codable, Equatable {
     /// keyboard plugged in later joins in without the user touching anything.
     var keyboards: [String] = []
 
+    /// Gaps longer than this are treated as "you were away" and left out of the
+    /// statistics. Optional rather than defaulted: a synthesised Codable throws on a
+    /// missing key, and Config.load falls back to defaults on any error -- so a
+    /// non-optional field would silently wipe the keyboard selection of every config
+    /// written before it existed.
+    var idleCapSeconds: TimeInterval?
+
+    var idleCap: TimeInterval { idleCapSeconds ?? 300 }
+
     static func load() -> Config {
         guard let data = try? Data(contentsOf: configFile),
               let cfg = try? JSONDecoder().decode(Config.self, from: data) else { return Config() }

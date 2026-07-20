@@ -78,6 +78,12 @@ check(Config(keyboards: []).selects("anything"), "empty selection means every ke
 check(Config(keyboards: ["Magic"]).selects("Magic"), "a named keyboard is selected")
 check(!Config(keyboards: ["Magic"]).selects("Internal"), "an unnamed keyboard is not")
 
+// A config written before idleCapSeconds existed must still load, or upgrading would
+// silently reset the user's keyboard selection.
+try? #"{"keyboards":["Magic"]}"#.write(to: configFile, atomically: true, encoding: .utf8)
+equal(Config.load().keyboards, ["Magic"], "a config predating a new field still loads")
+equal(Config.load().idleCap, 300, "and the new field falls back to its default")
+
 try? FileManager.default.removeItem(at: configFile)
 equal(Config.load(), Config(), "a missing config file loads defaults rather than failing")
 
@@ -183,6 +189,54 @@ equal(projectName(cwd: "/Users/someone/work/acme-secret"), "acme-secret",
       "only the last path component is kept, never the full path")
 equal(projectName(cwd: nil), "unknown", "a hook without a cwd still logs")
 equal(projectName(cwd: "/"), "unknown", "the root directory has no useful name")
+
+// MARK: - statistics
+
+section("statistics")
+
+func event(_ session: String, _ kind: SessionEvent, _ offset: TimeInterval,
+           project: String = "claudeled") -> LoggedEvent {
+    LoggedEvent(t: noon.timeIntervalSince1970 + offset, s: session, e: kind, p: project)
+}
+
+let cap: TimeInterval = 300
+
+let oneTurn = summarise([event("a", .prompt, 0), event("a", .stop, 60),
+                         event("a", .prompt, 90)], cap: cap)
+equal(oneTurn.totals.worked, 60, "prompt to stop is Claude working")
+equal(oneTurn.totals.waiting, 30, "stop to prompt is Claude waiting for you")
+equal(oneTurn.sessions, 1, "one session id is one session")
+
+equal(summarise([event("a", .notify, 0), event("a", .prompt, 45)], cap: cap).totals.blocked, 45,
+      "notify to the next event is time blocked on a permission prompt")
+
+let lunch = summarise([event("a", .stop, 0), event("a", .prompt, 3600)], cap: cap)
+equal(lunch.totals.waiting, 0, "a gap over the cap is not counted as waiting")
+equal(lunch.totals.away, 3600, "it is reported as away instead of vanishing")
+
+let crashed = summarise([event("a", .prompt, 0), event("a", .stop, 7200)], cap: cap)
+equal(crashed.totals.worked, 0,
+      "the cap applies to Claude's time too: a killed session cannot gift you two hours")
+
+let interleaved = summarise([event("a", .prompt, 0), event("b", .prompt, 10),
+                             event("a", .stop, 60), event("b", .stop, 100)], cap: cap)
+equal(interleaved.totals.worked, 150, "sessions are paired separately, not by arrival order")
+equal(interleaved.sessions, 2, "both sessions are counted")
+
+let mixed = summarise([event("a", .prompt, 0, project: "topscan"),
+                       event("a", .stop, 120, project: "topscan"),
+                       event("b", .prompt, 0), event("b", .stop, 30)], cap: cap)
+equal(mixed.projects.map(\.name), ["topscan", "claudeled"],
+      "projects are listed busiest first")
+equal(mixed.projects.first?.totals.worked, 120, "time lands on the right project")
+
+equal(summarise([event("a", .stop, 0)], cap: cap).totals, Totals(),
+      "a single event brackets no gap and contributes nothing")
+
+equal(formatDuration(45), "45s", "under a minute is shown in seconds")
+equal(formatDuration(90), "1m", "minutes are truncated, not rounded up to an hour")
+equal(formatDuration(3600 + 12 * 60), "1h 12m", "hours and minutes")
+equal(formatDuration(3600 + 5 * 60), "1h 05m", "minutes are padded, so columns line up")
 
 // MARK: - hook merging
 //
