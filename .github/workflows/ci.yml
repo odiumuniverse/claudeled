@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes the running one pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Toolchain
+        run: swift --version
+
+      # First, because it is the fastest signal and the most specific failure.
+      - name: Test
+        run: make test
+
+      # The build the Makefile does is warning-tolerant. This one is not: a warning
+      # that nobody is forced to look at is a warning that stays.
+      - name: Build with warnings as errors
+        run: |
+          swiftc -O Sources/claudeled/Core/*.swift Sources/claudeled/App/*.swift \
+            -warnings-as-errors -o "$RUNNER_TEMP/claudeled-strict"
+
+      - name: Lint
+        run: swiftlint lint --strict
+
+      # The completion is shipped and installed, but never compiled by anything else,
+      # so a syntax error in it would otherwise reach users.
+      - name: Parse the zsh completion
+        run: zsh -n completions/_claudeled
+
+      # Exercises the whole packaging path: it draws the icon from Tools/make-icon.swift
+      # (the .icns is generated, not committed), builds the bundle, ad-hoc signs it and
+      # zips it. Plenty to break that a plain `swiftc` never touches.
+      - name: Package
+        run: make release
+
+      - name: Checksum
+        run: shasum -a 256 build/*.zip
+
+      # Lets a pull request be downloaded and actually run, rather than trusted.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: claudeled-${{ github.sha }}
+          path: build/*.zip
+          retention-days: 14
