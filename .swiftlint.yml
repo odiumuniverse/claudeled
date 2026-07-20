@@ -1,0 +1,42 @@
+# SwiftLint runs with its defaults except for what is written here. Each entry is a
+# place where the default disagrees with a convention this codebase applies on purpose
+# and consistently -- not a place where a violation was inconvenient.
+
+excluded:
+  - build
+
+disabled_rules:
+  # Trailing commas in multi-line literals keep the diff to one line when an element is
+  # appended, and several of them here sit directly above an explanatory comment, where
+  # removing the comma would only move the churn around.
+  - trailing_comma
+
+  # This codebase writes the two branches of a short if/else as an aligned pair:
+  #
+  #     if remaining.isEmpty { hooks.removeValue(forKey: event.claudeEvent) }
+  #     else { hooks[event.claudeEvent] = remaining }
+  #
+  # The rule wants `} else {`. Lining the branches up at the same indent is the point.
+  - statement_position
+
+identifier_name:
+  # The default floor of three characters is at odds with Swift itself: `to:`, `at:` and
+  # `on:` are the argument labels the language's own naming guidelines ask for, and
+  # `static func == (a:b:)` is the canonical spelling of an equality operator. The rest
+  # of the rule -- casing, maximum length -- is left alone.
+  min_length: 1
+
+# Both limits below are above SwiftLint's defaults, and that is a recorded decision
+# rather than a silent bypass. Two functions drove it: the menu builder, which is a flat
+# sequence of NSMenuItem construction with no branching to speak of, and the icon
+# drawing routine in Tools/. Splitting either would trade one readable run of code for
+# two halves that are only ever called in sequence. The limits are set high enough to
+# clear those and low enough to still catch a function that genuinely grows a second
+# job -- tighten them if that stops being true.
+function_body_length:
+  warning: 120
+  error: 150
+
+cyclomatic_complexity:
+  warning: 15
+  error: 20
