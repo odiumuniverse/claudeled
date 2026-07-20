@@ -47,21 +47,25 @@ func monthFile(for date: Date) -> String {
     return String(format: "%04d-%02d.jsonl", parts.year ?? 0, parts.month ?? 0)
 }
 
-/// Every event in the window, oldest first. Unparseable lines are skipped rather than
-/// fatal: a truncated write at the end of a log must not cost you the whole report.
-func readEvents(from: Date, to: Date = Date()) -> [LoggedEvent] {
+/// Every event in the window, oldest first. `from` of nil means "no lower bound", which
+/// reads every log file rather than computing a span across them.
+///
+/// Unparseable lines are skipped rather than fatal: a truncated write at the end of a
+/// log must not cost you the whole report.
+func readEvents(from: Date? = nil, to: Date = Date()) -> [LoggedEvent] {
     guard let names = try? FileManager.default.contentsOfDirectory(atPath: eventsDir.path)
     else { return [] }
 
-    let wanted = Set(monthsSpanned(from: from, to: to))
+    let wanted = from.map { Set(monthsSpanned(from: $0, to: to)) }
     let decoder = JSONDecoder()
     var events: [LoggedEvent] = []
-    for name in names.sorted() where wanted.contains(name) {
+    for name in names.sorted()
+    where name.hasSuffix(".jsonl") && (wanted?.contains(name) ?? true) {
         guard let text = try? String(contentsOf: eventsDir.appendingPathComponent(name),
                                      encoding: .utf8) else { continue }
         for line in text.split(separator: "\n") {
             guard let event = try? decoder.decode(LoggedEvent.self, from: Data(line.utf8)),
-                  event.at >= from, event.at <= to else { continue }
+                  event.at <= to, from.map({ event.at >= $0 }) ?? true else { continue }
             events.append(event)
         }
     }

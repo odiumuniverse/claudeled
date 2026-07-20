@@ -149,6 +149,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
 
+        let stats = NSMenuItem(title: "Statistics…", action: #selector(openStats),
+                               keyEquivalent: "")
+        stats.target = self
+        menu.addItem(stats)
+        menu.addItem(.separator())
+
         let hooksInstalled = Hooks.installed
         let hooks = NSMenuItem(
             title: hooksInstalled ? "Claude Code hooks installed" : "Install Claude Code hooks",
@@ -224,6 +230,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSLog("claudeled: login item toggle failed: \(error)")
         }
         reopenMenu()
+    }
+
+    @objc private func openStats() {
+        StatsWindow.shared.show()
     }
 
     @objc private func openInputMonitoring() {

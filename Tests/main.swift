@@ -238,6 +238,34 @@ equal(formatDuration(90), "1m", "minutes are truncated, not rounded up to an hou
 equal(formatDuration(3600 + 12 * 60), "1h 12m", "hours and minutes")
 equal(formatDuration(3600 + 5 * 60), "1h 05m", "minutes are padded, so columns line up")
 
+// MARK: - periods and formats
+
+section("periods and formats")
+
+check(Period.all.start(now: noon) == nil, "'all time' has no lower bound, so every log is read")
+equal(Period.week.start(now: noon), noon.addingTimeInterval(-7 * day),
+      "a week is a rolling window, not a calendar one")
+equal(Period.allCases.map(\.rawValue), ["week", "month", "year", "all"],
+      "the periods the picker offers are the periods the flags accept")
+
+let sample = summarise([event("a", .prompt, 0, project: "topscan"),
+                        event("a", .stop, 120, project: "topscan"),
+                        event("a", .prompt, 180, project: "topscan")], cap: cap)
+
+let markdown = renderMarkdown(sample, label: "last 7 days", cap: cap)
+check(markdown.contains("| Claude worked | 2m |"), "markdown carries the headline totals")
+check(markdown.contains("| topscan | 2m | 1m |"), "markdown carries the per-project rows")
+
+let json = renderJSON(sample, period: .week, now: noon, cap: cap)
+check(json.contains("\"worked\" : 120"), "JSON reports whole seconds")
+check(json.contains("\"idleCapSeconds\" : 300"), "JSON says which cap produced the numbers")
+check(json.contains("\"name\" : \"topscan\""), "JSON carries the project breakdown")
+
+let table = renderText([Summary(label: "last 7 days", report: sample)],
+                       projects: sample, cap: cap)
+check(table.contains("waiting on you 1m"), "the table carries the headline totals")
+check(table.contains("1 session"), "a single session is not pluralised")
+
 // MARK: - hook merging
 //
 // This one writes to the user's settings.json in production, so it gets the most care.

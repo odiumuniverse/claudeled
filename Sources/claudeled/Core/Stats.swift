@@ -76,6 +76,44 @@ func summarise(_ events: [LoggedEvent], cap: TimeInterval) -> Report {
     return report
 }
 
+// MARK: - periods
+//
+// Rolling windows rather than calendar ones: "the last 30 days" is a number you can
+// compare with last week's, where "this month" shrinks to nothing every first of the
+// month.
+
+enum Period: String, CaseIterable {
+    case week, month, year, all
+
+    var label: String {
+        switch self {
+        case .week:  return "last 7 days"
+        case .month: return "last 30 days"
+        case .year:  return "last 365 days"
+        case .all:   return "all time"
+        }
+    }
+
+    /// nil means "no lower bound": read every log file there is.
+    func start(now: Date) -> Date? {
+        switch self {
+        case .week:  return now.addingTimeInterval(-7 * 24 * 3600)
+        case .month: return now.addingTimeInterval(-30 * 24 * 3600)
+        case .year:  return now.addingTimeInterval(-365 * 24 * 3600)
+        case .all:   return nil
+        }
+    }
+
+    func report(now: Date = Date(), cap: TimeInterval) -> Report {
+        summarise(readEvents(from: start(now: now), to: now), cap: cap)
+    }
+}
+
+struct Summary: Equatable {
+    let label: String
+    let report: Report
+}
+
 // MARK: - rendering
 
 func formatDuration(_ seconds: TimeInterval) -> String {
@@ -86,27 +124,35 @@ func formatDuration(_ seconds: TimeInterval) -> String {
     return "\(minutes / 60)h \(String(format: "%02d", minutes % 60))m"
 }
 
-func renderReport(today: Report, week: Report, cap: TimeInterval) -> String {
-    var lines: [String] = []
+private func footer(_ report: Report, cap: TimeInterval) -> String {
+    var text = "\(report.sessions) session\(report.sessions == 1 ? "" : "s")"
+    if report.totals.away > 0 {
+        text += " · \(formatDuration(report.totals.away)) skipped as away "
+            + "(gaps over \(formatDuration(cap)))"
+    }
+    return text
+}
 
-    func summary(_ label: String, _ report: Report) -> String {
-        var parts = ["worked \(formatDuration(report.totals.worked))",
-                     "waiting on you \(formatDuration(report.totals.waiting))"]
-        if report.totals.blocked > 0 {
-            parts.append("blocked \(formatDuration(report.totals.blocked))")
+func renderText(_ summaries: [Summary], projects: Report, cap: TimeInterval) -> String {
+    var lines: [String] = []
+    let labelWidth = (summaries.map(\.label.count).max() ?? 0) + 2
+
+    for summary in summaries {
+        var parts = ["worked \(formatDuration(summary.report.totals.worked))",
+                     "waiting on you \(formatDuration(summary.report.totals.waiting))"]
+        if summary.report.totals.blocked > 0 {
+            parts.append("blocked \(formatDuration(summary.report.totals.blocked))")
         }
-        return "\(label.padding(toLength: 11, withPad: " ", startingAt: 0))\(parts.joined(separator: " · "))"
+        lines.append(summary.label.padding(toLength: labelWidth, withPad: " ", startingAt: 0)
+                     + parts.joined(separator: " · "))
     }
 
-    lines.append(summary("today", today))
-    lines.append(summary("this week", week))
-
-    if !week.projects.isEmpty {
-        let width = max(7, week.projects.map(\.name.count).max() ?? 7)
+    if !projects.projects.isEmpty {
+        let width = max(7, projects.projects.map(\.name.count).max() ?? 7)
         lines.append("")
-        lines.append("\("project".padding(toLength: width, withPad: " ", startingAt: 0))  "
-                     + "  worked   waiting")
-        for project in week.projects {
+        lines.append("project".padding(toLength: width, withPad: " ", startingAt: 0)
+                     + "    worked   waiting")
+        for project in projects.projects {
             lines.append(
                 project.name.padding(toLength: width, withPad: " ", startingAt: 0)
                 + "  " + formatDuration(project.totals.worked).leftPadded(to: 8)
@@ -115,14 +161,58 @@ func renderReport(today: Report, week: Report, cap: TimeInterval) -> String {
     }
 
     lines.append("")
-    var footer = "\(week.sessions) session\(week.sessions == 1 ? "" : "s") this week"
-    if week.totals.away > 0 {
-        footer += " · \(formatDuration(week.totals.away)) skipped as away "
-            + "(gaps over \(formatDuration(cap)))"
-    }
-    lines.append(footer)
-
+    lines.append(footer(projects, cap: cap))
     return lines.joined(separator: "\n")
+}
+
+func renderMarkdown(_ report: Report, label: String, cap: TimeInterval) -> String {
+    var lines = ["### Claude Code — \(label)", ""]
+    lines.append("| | time |")
+    lines.append("| --- | ---: |")
+    lines.append("| Claude worked | \(formatDuration(report.totals.worked)) |")
+    lines.append("| waiting on you | \(formatDuration(report.totals.waiting)) |")
+    if report.totals.blocked > 0 {
+        lines.append("| blocked on a prompt | \(formatDuration(report.totals.blocked)) |")
+    }
+
+    if !report.projects.isEmpty {
+        lines.append(contentsOf: ["", "| project | worked | waiting |", "| --- | ---: | ---: |"])
+        for project in report.projects {
+            lines.append("| \(project.name) | \(formatDuration(project.totals.worked)) "
+                         + "| \(formatDuration(project.totals.waiting)) |")
+        }
+    }
+
+    lines.append(contentsOf: ["", footer(report, cap: cap)])
+    return lines.joined(separator: "\n")
+}
+
+/// Seconds, as integers: whoever consumes this can format them their own way, and a
+/// fractional second of "waiting" helps nobody.
+func renderJSON(_ report: Report, period: Period, now: Date, cap: TimeInterval) -> String {
+    func totals(_ totals: Totals) -> [String: Int] {
+        ["worked": Int(totals.worked.rounded()),
+         "waiting": Int(totals.waiting.rounded()),
+         "blocked": Int(totals.blocked.rounded()),
+         "away": Int(totals.away.rounded())]
+    }
+    let payload: [String: Any] = [
+        "period": period.rawValue,
+        "from": period.start(now: now).map { Int($0.timeIntervalSince1970) } as Any,
+        "to": Int(now.timeIntervalSince1970),
+        "idleCapSeconds": Int(cap),
+        "sessions": report.sessions,
+        "totals": totals(report.totals),
+        "projects": report.projects.map { project -> [String: Any] in
+            var entry = totals(project.totals) as [String: Any]
+            entry["name"] = project.name
+            return entry
+        },
+    ]
+    guard let data = try? JSONSerialization.data(
+        withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]),
+        let text = String(data: data, encoding: .utf8) else { return "{}" }
+    return text
 }
 
 private extension String {
@@ -133,18 +223,17 @@ private extension String {
 
 // MARK: - the default view
 
+let noEventsYet = "no events logged yet — the log starts filling on your next Claude Code turn"
+
 /// Today plus the last seven days, which is what `claudeled stats` prints bare.
 func statsText(now: Date = Date(), cap: TimeInterval = Config.load().idleCap) -> String {
+    let week = readEvents(from: now.addingTimeInterval(-7 * 24 * 3600), to: now)
+    guard !week.isEmpty else { return noEventsYet }
+
     let startOfToday = Calendar.current.startOfDay(for: now)
-    let weekAgo = now.addingTimeInterval(-7 * 24 * 3600)
-
-    let week = readEvents(from: weekAgo, to: now)
-    guard !week.isEmpty else {
-        return "no events logged yet — the log starts filling on your next Claude Code turn"
-    }
-    let today = week.filter { $0.at >= startOfToday }
-
-    return renderReport(today: summarise(today, cap: cap),
-                        week: summarise(week, cap: cap),
-                        cap: cap)
+    let weekReport = summarise(week, cap: cap)
+    return renderText([Summary(label: "today",
+                               report: summarise(week.filter { $0.at >= startOfToday }, cap: cap)),
+                       Summary(label: "last 7 days", report: weekReport)],
+                      projects: weekReport, cap: cap)
 }

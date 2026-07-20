@@ -16,7 +16,7 @@ _claudeled() {
     'devices:list keyboards and which are selected'
     'test:light a keyboard for 3s'
     'status:show tracked sessions and the current mode'
-    'stats:time spent, today and this week'
+    'stats:time spent, today and over the last 7 days'
     'hooks:print the Claude Code hook config to install'
   )
 
@@ -35,6 +35,22 @@ _claudeled() {
           ;;
         devices)
           _arguments '--names[print names only, for scripts]'
+          ;;
+        stats)
+          local -a periods
+          periods=(
+            'week:the last 7 days'
+            'month:the last 30 days'
+            'year:the last 365 days'
+            'all:every event ever logged'
+          )
+          _arguments \
+            '1:period:{_describe -t periods period periods}' \
+            '-i[pick a period and a destination with the arrow keys]' \
+            '--pick[pick a period and a destination with the arrow keys]' \
+            '--json[print the numbers as JSON]' \
+            '--md[print a markdown table]' \
+            '--card[write a PNG card]:file:_files -g "*.png"'
           ;;
       esac
       ;;

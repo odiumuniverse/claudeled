@@ -30,7 +30,7 @@ case "show":
 case "devices": cliDevices(namesOnly: arguments.contains("--names"))
 case "test":    cliTest(arguments.count > 1 ? arguments[1] : "")
 case "status":  cliStatus()
-case "stats":   print(statsText())
+case "stats":   cliStats(Array(arguments.dropFirst()))
 case "hooks":   print(hookConfig)
 case "hook":    cliHook(arguments.count > 1 ? arguments[1] : "")
 case "-h", "--help", "help": print(usage)

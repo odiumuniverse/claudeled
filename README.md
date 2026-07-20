@@ -101,7 +101,7 @@ claudeled devices            list keyboards and which ones blink
 claudeled devices --names    names only, for scripts
 claudeled test <keyboard>    light a keyboard for 3s
 claudeled status             show tracked sessions
-claudeled stats              time spent, today and this week
+claudeled stats              time spent, today and over the last 7 days
 claudeled show               bring the icon back after hiding it
 claudeled hooks              print the hook config, if you prefer to install it yourself
 ```
@@ -149,6 +149,20 @@ claudeled     2h 43m    1h 31m
 Every pair of consecutive events brackets a gap, and the earlier event says what was
 happening during it: after `prompt` Claude is working, after `stop` it is waiting for
 you, after `notify` it is blocked on a permission prompt.
+
+```
+claudeled stats week|month|year|all   one window instead of today plus the week
+claudeled stats -i                    pick a period and a destination with the arrows
+claudeled stats month --md            a markdown table, for pasting
+claudeled stats week --json           the same numbers, for scripts
+claudeled stats all --card [file]     a PNG card, for sharing
+```
+
+The menu has the same thing under *Statistics…*, with buttons for copying the
+markdown and saving the card.
+
+The picker only appears when both ends are a terminal, so `claudeled stats --json |
+jq` is never interrupted by a menu.
 
 A gap longer than five minutes is not counted at all — you went to lunch, or shut the
 lid, and no honest number can tell that apart from thinking hard. It is reported on

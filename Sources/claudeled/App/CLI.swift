@@ -71,6 +71,107 @@ func cliStatus() {
     }
 }
 
+// MARK: - stats
+
+/// Where a card goes when the picker writes one, and when `--card` is given no path.
+private func defaultCardPath(_ period: Period) -> URL {
+    let stamp = ISO8601DateFormatter()
+    stamp.formatOptions = [.withFullDate]
+    return FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Desktop/claudeled-\(period.rawValue)-"
+                                + "\(stamp.string(from: Date())).png")
+}
+
+private func writeCard(_ report: Report, period: Period, cap: TimeInterval, to url: URL) {
+    guard let png = Card.png(report, label: period.label, cap: cap) else {
+        print("could not render the card")
+        exit(1)
+    }
+    do {
+        try png.write(to: url)
+        print("wrote \(url.path)")
+    } catch {
+        print("could not write \(url.path): \(error.localizedDescription)")
+        exit(1)
+    }
+}
+
+private func copyToClipboard(_ text: String) {
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/pbcopy")
+    let pipe = Pipe()
+    task.standardInput = pipe
+    guard (try? task.run()) != nil else { print(text); return }
+    pipe.fileHandleForWriting.write(Data(text.utf8))
+    try? pipe.fileHandleForWriting.close()
+    task.waitUntilExit()
+}
+
+func cliStats(_ arguments: [String]) {
+    let cap = Config.load().idleCap
+    let now = Date()
+
+    if arguments.contains("-i") || arguments.contains("--pick") {
+        statsPicker(cap: cap, now: now)
+        return
+    }
+
+    let period = arguments.compactMap(Period.init(rawValue:)).first
+    let card = arguments.contains("--card")
+    let json = arguments.contains("--json")
+    let markdown = arguments.contains("--md")
+
+    // Bare `claudeled stats` is the two-window view; anything else is one window.
+    guard period != nil || card || json || markdown else {
+        print(statsText(now: now, cap: cap))
+        return
+    }
+
+    let chosen = period ?? .week
+    let report = chosen.report(now: now, cap: cap)
+
+    if card {
+        let explicit = arguments.drop { $0 != "--card" }.dropFirst().first
+        let url = explicit.map { URL(fileURLWithPath: $0) } ?? defaultCardPath(chosen)
+        writeCard(report, period: chosen, cap: cap, to: url)
+    } else if json {
+        print(renderJSON(report, period: chosen, now: now, cap: cap))
+    } else if markdown {
+        print(renderMarkdown(report, label: chosen.label, cap: cap))
+    } else {
+        print(renderText([Summary(label: chosen.label, report: report)],
+                         projects: report, cap: cap))
+    }
+}
+
+/// Two lists: what to report on, and where to send it. The format follows from the
+/// destination -- markdown is for pasting, a PNG is for sharing, a table is for looking
+/// at now.
+private func statsPicker(cap: TimeInterval, now: Date) {
+    guard Term.interactive else {
+        print(statsText(now: now, cap: cap))
+        return
+    }
+    guard let periodIndex = choose("Period", Period.allCases.map(\.label)) else { return }
+    let period = Period.allCases[periodIndex]
+
+    guard let destination = choose("Send to",
+                                   ["show it here", "copy as markdown", "save a PNG card"])
+    else { return }
+
+    let report = period.report(now: now, cap: cap)
+    switch destination {
+    case 0:
+        print(renderText([Summary(label: period.label, report: report)],
+                         projects: report, cap: cap))
+    case 1:
+        copyToClipboard(renderMarkdown(report, label: period.label, cap: cap))
+        print("copied \(period.label) to the clipboard")
+    default:
+        writeCard(report, period: period, cap: cap, to: defaultCardPath(period))
+    }
+}
+
 /// Hooks pipe their JSON on stdin. Never fail loudly: a broken hook must not break Claude.
 func cliHook(_ eventName: String) {
     let data = FileHandle.standardInput.readDataToEndOfFile()
@@ -95,7 +196,12 @@ claudeled -- Caps Lock LED indicator for Claude Code
   claudeled devices --names    names only, for shell completion
   claudeled test <keyboard>    light a keyboard for 3s
   claudeled status             show tracked sessions
-  claudeled stats              time spent, today and this week
+  claudeled stats              time spent, today and over the last 7 days
+  claudeled stats <period>     week | month | year | all
+  claudeled stats -i           pick a period and a destination with the arrow keys
+  claudeled stats … --json     the same numbers, for scripts
+  claudeled stats … --md       a markdown table, for pasting
+  claudeled stats … --card [f] a PNG card, for sharing
   claudeled show               bring the menu bar icon back after hiding it
   claudeled hooks              print the hook config, to install it by hand
   claudeled hook <event>       internal: called by the hooks themselves
